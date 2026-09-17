@@ -164,6 +164,11 @@ protected:
     VisionEncoder(const ModelsMap& models_map, const std::filesystem::path& config_dir, ConfigOnlyTag);
 
 public:
+    VisionEncoder(const std::shared_ptr<ov::Model>& model,
+                  const ProcessorConfig& processor,
+                  const std::string& device,
+                  const ov::AnyMap& properties);
+
     VisionEncoder(
         const std::filesystem::path& model_dir,
         const std::string& device,
