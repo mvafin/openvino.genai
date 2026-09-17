@@ -34,6 +34,12 @@ struct NormalizedPrompt {
 
 class InputsEmbedder {
 public:
+    InputsEmbedder(const VLMConfig& config,
+                   const Tokenizer& tokenizer,
+                   const VisionEncoder::Ptr& vision,
+                   const EmbeddingsModel::Ptr& embeddings,
+                   const std::string& device);
+
     InputsEmbedder(const std::filesystem::path& model_dir,
                    const Tokenizer& tokenizer,
                    const std::string& device,
@@ -269,6 +275,12 @@ private:
             const std::vector<EncodedVideo>& videos) const;
 
     protected:
+        IInputsEmbedder(const VLMConfig& config,
+                        const Tokenizer& tokenizer,
+                        const VisionEncoder::Ptr& vision,
+                        const EmbeddingsModel::Ptr& embeddings,
+                        const std::string& device);
+
         IInputsEmbedder(
             const VLMConfig& vlm_config,
             const std::filesystem::path& model_dir,

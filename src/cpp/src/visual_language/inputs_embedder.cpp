@@ -85,6 +85,27 @@ void InputsEmbedder::IInputsEmbedder::finish_chat() {
     m_cache_state.reset_state();
 }
 
+InputsEmbedder::IInputsEmbedder::IInputsEmbedder(const VLMConfig& config,
+                                                 const Tokenizer& tokenizer,
+                                                 const VisionEncoder::Ptr& vision,
+                                                 const EmbeddingsModel::Ptr& embeddings,
+                                                 const std::string& device)
+    : m_vlm_config(config),
+      m_vision_encoder(vision),
+      m_embedding(embeddings),
+      m_tokenizer(tokenizer),
+      m_pruning_processor(std::make_shared<VisionTokenPruningProcessor>(device)) {}
+
+InputsEmbedder::InputsEmbedder(const VLMConfig& config,
+                               const Tokenizer& tokenizer,
+                               const VisionEncoder::Ptr& vision,
+                               const EmbeddingsModel::Ptr& embeddings,
+                               const std::string& device) {
+    OPENVINO_ASSERT(config.model_type == VLMModelType::GEMMA3,
+                    "GGUF multimodal pipeline adapter is not implemented for this model family");
+    m_impl = std::make_shared<InputsEmbedderGemma3>(config, tokenizer, vision, embeddings, device);
+}
+
 InputsEmbedder::IInputsEmbedder::IInputsEmbedder(
         const VLMConfig& vlm_config,
         const std::filesystem::path& model_dir,
