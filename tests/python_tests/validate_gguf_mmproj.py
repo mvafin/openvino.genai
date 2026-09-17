@@ -7,7 +7,7 @@ Build gguf_mmproj_oracle.cpp against REFERENCE_REVISION. No llama.cpp production
 """
 import argparse
 import json
-import subprocess
+import subprocess  # nosec B404
 import tempfile
 from pathlib import Path
 
