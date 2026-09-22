@@ -542,6 +542,14 @@ CacheTypes get_cache_types(const ov::Model& model) {
     // "ReadValue" node is cache representation in stateful model
     const std::string state_node_type_name = std::string(ov::op::v6::ReadValue::get_type_info_static().name);
     CacheTypes cache_types;
+    // GGUF recurrent state has a fixed batch-one initializer, so shape heuristics
+    // cannot distinguish it from other static state. Use the frontend's state pairs.
+    if (model.has_rt_info("gguf_recurrent_states")) {
+        const auto& states = model.get_rt_info<std::vector<std::string>>("gguf_recurrent_states");
+        if (!states.empty()) {
+            cache_types.add_linear();
+        }
+    }
 
     for (const auto& op : model.get_ops()) {
         // check input size, as in LoRA adapters case it could be 0
