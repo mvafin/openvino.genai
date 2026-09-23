@@ -217,6 +217,7 @@ def run(args, report):
             first_result = pipe.generate(image_prompt,
                 images=[ov.Tensor(pixels[None])], max_new_tokens=20, do_sample=False, streamer=first)
             chat_reset_matches = first.tokens == cases[1]["tokens"]
+            report["chat_initial_tokens"] = first.tokens
             followup = Tokens()
             followup_prompt = "What is shown?"
             followup_result = pipe.generate(followup_prompt, max_new_tokens=20,
@@ -265,7 +266,7 @@ def run(args, report):
                 reference_history = [{"role": "user", "content": reference_prompt}]
                 case = compare(reference_history, stream.tokens, result.texts[0],
                                "modern_audio" if audio else "modern_image", not audio, audio)
-                assert case["first_token_matches"] and case["matching_choice_fraction"] >= .9, case
+                first_case = case
                 # Switch to a different history with identical media-token geometry.
                 # Token IDs alone cannot distinguish the two encoders' outputs.
                 other = genai.ChatHistory([{"role": "user", "content": prompt}])
@@ -281,7 +282,8 @@ def run(args, report):
                 result = pipe.generate(history, max_new_tokens=20, do_sample=False, streamer=stream)
                 case = compare(reference_history, stream.tokens, result.texts[0],
                                "modern_audio_chat" if audio else "modern_image_chat", not audio, audio)
-                assert case["first_token_matches"] and case["matching_choice_fraction"] >= .9, case
+                assert all(c["first_token_matches"] and c["matching_choice_fraction"] >= .9
+                           for c in (first_case, case)), (first_case, case)
 
             def beam_search():
                 result = pipe.generate(image_prompt, images=[ov.Tensor(pixels[None])],
