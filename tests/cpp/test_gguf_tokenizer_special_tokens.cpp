@@ -91,6 +91,33 @@ TEST(GGUFTokenizer, ChatTemplateSupportsUndefinedAndAdjacentStringLiterals) {
     EXPECT_EQ(tokenizer.apply_chat_template({{{"role", "user"}, {"content", "a"}}}, false), "firstseconda");
 }
 
+TEST(GGUFMultimodal, PreformattedChatDoesNotDuplicateSpecialTokens) {
+    using namespace ov::genai;
+    Tokenizer tokenizer(sentencepiece_config());
+    struct TestEmbedder : InputsEmbedderGemma4 {
+        using InputsEmbedderGemma4::InputsEmbedderGemma4;
+        using IInputsEmbedder::get_encoded_input_ids;
+    };
+    VLMConfig config;
+    TestEmbedder embedder(config, tokenizer, nullptr, nullptr, "CPU", false);
+    const auto encode = [&](const std::string& prompt) {
+        VLMPerfMetrics metrics;
+        auto ids = embedder.get_encoded_input_ids(prompt, metrics);
+        return std::vector<int64_t>(ids.data<int64_t>(), ids.data<int64_t>() + ids.get_size());
+    };
+    const std::vector<int64_t> expected{1, 4, 9, 5};
+    EXPECT_EQ(encode("a"), expected);
+    embedder.finish_chat();
+    embedder.set_apply_chat_template_status(false, true);
+    EXPECT_EQ(encode(tokenizer.apply_chat_template({{{"role", "user"}, {"content", "a"}}}, true)), expected);
+    embedder.finish_chat();
+    embedder.set_apply_chat_template_status(false);
+    EXPECT_EQ(encode("a"), (std::vector<int64_t>{1, 9}));
+    embedder.finish_chat();
+    embedder.set_apply_chat_template_status(true);
+    EXPECT_EQ(encode("a"), expected);
+}
+
 TEST(GGUFMultimodal, GemmaAudioHistoryAndResetPreserveFeaturePlacement) {
     using namespace ov::genai;
     Tokenizer tokenizer(sentencepiece_config());
