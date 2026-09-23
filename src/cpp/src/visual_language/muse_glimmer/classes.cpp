@@ -192,6 +192,10 @@ void fill_video_metadata(ov::genai::VideoMetadata& metadata,
                     ", got ",
                     num_frames);
 
+    if (num_frames == 1) {
+        metadata.frames_indices = {0};
+        return;
+    }
     metadata.frames_indices.reserve(num_frames);
     for (size_t idx = 0; idx < num_frames; ++idx) {
         const double position =
@@ -203,6 +207,17 @@ void fill_video_metadata(ov::genai::VideoMetadata& metadata,
 }  // namespace
 
 namespace ov::genai {
+
+VisionEncoderMuseGlimmer::VisionEncoderMuseGlimmer(const std::shared_ptr<ov::Model>& model,
+                                                   const ProcessorConfig& config,
+                                                   const std::string& device,
+                                                   const ov::AnyMap& properties)
+    : VisionEncoder(model, config, device, properties),
+      m_gguf_window(std::stoull(model->get_rt_info<std::string>({"gguf_mmproj", "vision.window_size"}))) {
+    static_cast<ProcessorConfig&>(m_video_processor_config) = config;
+    m_video_processor_config.fps = 2.f;
+    m_video_processor_config.num_frames = 32;
+}
 
 EncodedImage VisionEncoderMuseGlimmer::encode(const ov::Tensor& image, const ov::AnyMap& config_map) {
     const ProcessorConfig config = ProcessorConfig::from_any_map(config_map, m_processor_config);
@@ -217,17 +232,66 @@ EncodedImage VisionEncoderMuseGlimmer::encode_with_config(const std::vector<ov::
 
     MuseGlimmerVisionInputs inputs = get_vision_inputs(frames, config, max_tokens);
 
-    encoder.set_tensor("pixel_values", inputs.pixel_values);
-    encoder.set_tensor("image_grid_thw", inputs.image_grid_thw);
+    if (m_gguf_window) {
+        const auto* grid = inputs.image_grid_thw.data<const int64_t>();
+        const size_t gh = grid[1], gw = grid[2], n = gh * gw, patch = config.patch_size;
+        ov::Tensor pixels(ov::element::f32, {1, 3, gh * patch, gw * patch});
+        const auto* flat = inputs.pixel_values.data<const float>();
+        for (size_t i = 0; i < n; ++i)
+            for (size_t c = 0; c < 3; ++c)
+                for (size_t y = 0; y < patch; ++y)
+                    for (size_t x = 0; x < patch; ++x)
+                        pixels.data<float>()[c * n * patch * patch + (i / gw * patch + y) * gw * patch +
+                                             i % gw * patch + x] = flat[((i * 3 + c) * patch + y) * patch + x];
+        std::vector<int32_t> order, groups, inverse(n), merge;
+        int32_t group = 0;
+        for (size_t wy = 0; wy < gh; wy += m_gguf_window)
+            for (size_t wx = 0; wx < gw; wx += m_gguf_window, ++group)
+                for (size_t y = wy; y < std::min(wy + m_gguf_window, gh); ++y)
+                    for (size_t x = wx; x < std::min(wx + m_gguf_window, gw); ++x) {
+                        order.push_back(y * gw + x);
+                        groups.push_back(group);
+                    }
+        std::vector<int32_t> xs(n), ys(n);
+        for (size_t i = 0; i < n; ++i) {
+            inverse[order[i]] = i;
+            xs[i] = order[i] % gw + 1;
+            ys[i] = order[i] / gw + 1;
+        }
+        for (size_t y = 0; y < gh; y += config.merge_size)
+            for (size_t x = 0; x < gw; x += config.merge_size)
+                for (size_t dy = 0; dy < config.merge_size; ++dy)
+                    for (size_t dx = 0; dx < config.merge_size; ++dx)
+                        merge.push_back((y + dy) * gw + x + dx);
+        const auto set_indices = [&](const char* name, const std::vector<int32_t>& values) {
+            ov::Tensor tensor(ov::element::i32, {1, 1, 1, values.size()});
+            std::copy(values.begin(), values.end(), tensor.data<int32_t>());
+            encoder.set_tensor(name, tensor);
+        };
+        set_indices("patch_indices", order);
+        set_indices("output_indices", inverse);
+        set_indices("position_x", xs);
+        set_indices("position_y", ys);
+        set_indices("merge_indices", merge);
+        ov::Tensor mask(ov::element::f32, {1, 1, n, n});
+        for (size_t q = 0; q < n; ++q)
+            for (size_t k = 0; k < n; ++k)
+                mask.data<float>()[q * n + k] = groups[q] == groups[k] ? 0.f : -std::numeric_limits<float>::infinity();
+        encoder.set_tensor("attention_mask", mask);
+        encoder.set_tensor("pixel_values", pixels);
+    } else {
+        encoder.set_tensor("pixel_values", inputs.pixel_values);
+        encoder.set_tensor("image_grid_thw", inputs.image_grid_thw);
+    }
     encoder.infer();
 
     const ov::Tensor& infer_output = encoder.get_output_tensor();
     const ov::Shape& infer_output_shape = infer_output.get_shape();
-    OPENVINO_ASSERT(infer_output_shape.size() == 2,
+    OPENVINO_ASSERT(infer_output_shape.size() == (m_gguf_window ? 3 : 2),
                     "Muse Glimmer vision embeddings output must have rank 2 [num_patches, hidden_size], got ",
                     infer_output_shape);
-    const size_t num_image_tokens = infer_output_shape.at(0);
-    const size_t hidden_size = infer_output_shape.at(1);
+    const size_t num_image_tokens = infer_output_shape.at(m_gguf_window ? 1 : 0);
+    const size_t hidden_size = infer_output_shape.back();
 
     ov::Tensor image_features(infer_output.get_element_type(), {1, num_image_tokens, hidden_size});
     std::memcpy(image_features.data(), infer_output.data(), infer_output.get_byte_size());

@@ -22,6 +22,12 @@ public:
 
 class InputsEmbedderGemma3 : public InputsEmbedder::IInputsEmbedder {
 public:
+    InputsEmbedderGemma3(const VLMConfig& config,
+                         const Tokenizer& tokenizer,
+                         const VisionEncoder::Ptr& vision,
+                         const EmbeddingsModel::Ptr& embeddings,
+                         const std::string& device);
+
     InputsEmbedderGemma3(
         const VLMConfig& vlm_config,
         const std::filesystem::path& model_dir,
@@ -50,6 +56,10 @@ public:
     std::pair<ov::Tensor, std::optional<int64_t>> get_generation_phase_position_ids(const size_t inputs_embeds_size, const size_t history_size, int64_t rope_delta) override;
 
 private:
+    // Defaults follow HF/optimum-intel; the GGUF graph uses neither convention.
+    std::string m_image_tag_separator = "\n\n";
+    size_t m_position_ids_offset = 1;
+
     /**
      * @brief Patches the original Gemma3 chat template by removing trim filters.
      *

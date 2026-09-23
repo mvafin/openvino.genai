@@ -381,10 +381,12 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
         vlm_utils::update_image_slice_counts(vlm_perf_metrics[0], encoded_images);
 
         // Encode this prompt's audios under m_embeddings_mutex right before tokenization.
-        if (!m_pending_audios_batches.empty() && !m_pending_audios_batches[0].empty()) {
+        {
             std::lock_guard<std::mutex> lock(m_embeddings_mutex);
             const auto audio_encoding_start = std::chrono::steady_clock::now();
-            m_inputs_embedder->encode_audios(m_pending_audios_batches[0]);
+            m_inputs_embedder->encode_audios(
+                m_pending_audios_batches.empty() ? std::vector<ov::Tensor>{} : m_pending_audios_batches[0],
+                true);
             PerfMetrics::emplace_duration(vlm_perf_metrics[0].vlm_raw_metrics.audio_encoding_durations, audio_encoding_start);
         }
 
@@ -400,7 +402,7 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
         std::string templated_history = m_tokenizer.apply_chat_template(m_history, true);
         PerfMetrics::emplace_duration(vlm_perf_metrics[0].raw_metrics.chat_template_durations, template_start);
 
-        m_inputs_embedder->set_apply_chat_template_status(false);
+        m_inputs_embedder->set_apply_chat_template_status(false, true);
 
         size_t cache_size_before = prepare_prompt_ids(prompt, sampling_params[0]);
 
@@ -440,10 +442,11 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
 
             // Encode this prompt's audios under m_embeddings_mutex right before tokenization.
             // encode_audios overwrites the embedder's audio cache, so this must run per-prompt.
-            if (i < m_pending_audios_batches.size() && !m_pending_audios_batches[i].empty()) {
+            {
                 std::lock_guard<std::mutex> lock(m_embeddings_mutex);
                 const auto audio_encoding_start = std::chrono::steady_clock::now();
-                m_inputs_embedder->encode_audios(m_pending_audios_batches[i]);
+                m_inputs_embedder->encode_audios(i < m_pending_audios_batches.size() ? m_pending_audios_batches[i]
+                                                                                     : std::vector<ov::Tensor>{});
                 PerfMetrics::emplace_duration(vlm_perf_metrics[i].vlm_raw_metrics.audio_encoding_durations, audio_encoding_start);
             }
 
@@ -650,19 +653,20 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
 
         auto start_get_inputs_embeds = std::chrono::steady_clock::now();
 
-        // Encode this history's audios under m_embeddings_mutex right before tokenization.
-        // encode_audios overwrites the embedder's audio cache, so this must run per-history.
-        if (i < m_pending_audios_batches.size() && !m_pending_audios_batches[i].empty()) {
-            std::lock_guard<std::mutex> lock(m_embeddings_mutex);
-            const auto audio_encoding_start = std::chrono::steady_clock::now();
-            m_inputs_embedder->encode_audios(m_pending_audios_batches[i]);
-            PerfMetrics::emplace_duration(vlm_perf_metrics[i].vlm_raw_metrics.audio_encoding_durations, audio_encoding_start);
-        }
-
         VLMChatContext chat_context(histories[i], m_vision_registry, *m_inputs_embedder);
         chat_contexts.push_back(std::move(chat_context));
 
-        auto processed_chat_data = chat_contexts[i].process(images_vector[i], videos_vector[i], videos_metadata_vector[i]);
+        VLMChatContext::ProcessedChatData processed_chat_data;
+        {
+            std::lock_guard<std::mutex> lock(m_embeddings_mutex);
+            processed_chat_data = chat_contexts[i].process(
+                images_vector[i],
+                videos_vector[i],
+                videos_metadata_vector[i],
+                i < m_pending_audios_batches.size() ? m_pending_audios_batches[i] : std::vector<ov::Tensor>{});
+        }
+        vlm_perf_metrics[i].vlm_raw_metrics.audio_encoding_durations.emplace_back(
+            processed_chat_data.audio_encoding_duration);
 
         vlm_perf_metrics[i].vlm_raw_metrics.vision_encoding_durations.emplace_back(
             processed_chat_data.vision_encoding_duration
@@ -675,7 +679,7 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
         );
         PerfMetrics::emplace_duration(vlm_perf_metrics[i].raw_metrics.chat_template_durations, template_start);
 
-        m_inputs_embedder->set_apply_chat_template_status(false);
+        m_inputs_embedder->set_apply_chat_template_status(false, true);
 
         // Snapshot the embedder's token cache so the newly added prompt slice can be recovered
         // after tokenization (used by the Omni Talker via original_prompt_ids_list).

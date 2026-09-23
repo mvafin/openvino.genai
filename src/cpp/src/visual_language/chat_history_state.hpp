@@ -44,6 +44,9 @@ struct MessageMetadata {
     std::vector<size_t> provided_image_indices;
     std::vector<size_t> provided_video_indices;
 
+    // Audio features belong to this message and survive switching between histories.
+    std::vector<ov::Tensor> audio_features;
+
     // Global indices in order of appearance in normalized content
     std::vector<size_t> image_sequence;
     std::vector<size_t> video_sequence;

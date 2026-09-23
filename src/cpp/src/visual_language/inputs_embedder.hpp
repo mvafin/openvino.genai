@@ -22,6 +22,7 @@
 
 namespace ov::genai {
 struct VLMPerfMetrics;
+using AudioEncode = std::function<std::vector<ov::Tensor>(const ov::Tensor&)>;
 
 const static std::regex UNIVERSAL_IMAGE_PATTERN{R"(<ov_genai_image_(\d+)>)"};
 const static std::regex UNIVERSAL_VIDEO_PATTERN{R"(<ov_genai_video_(\d+)>)"};
@@ -34,6 +35,13 @@ struct NormalizedPrompt {
 
 class InputsEmbedder {
 public:
+    InputsEmbedder(const VLMConfig& config,
+                   const Tokenizer& tokenizer,
+                   const VisionEncoder::Ptr& vision,
+                   const EmbeddingsModel::Ptr& embeddings,
+                   const std::string& device,
+                   bool retain_token_ids = false);
+
     InputsEmbedder(const std::filesystem::path& model_dir,
                    const Tokenizer& tokenizer,
                    const std::string& device,
@@ -73,7 +81,16 @@ public:
         const std::vector<VideoMetadata>& videos_metadata = {}
     );
 
-    void encode_audios(const std::vector<ov::Tensor>& audios);
+    void encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history = false);
+    std::vector<ov::Tensor> get_audio_features() const {
+        return m_impl->get_audio_features();
+    }
+    void set_audio_history(const std::vector<ov::Tensor>& features) {
+        m_impl->set_audio_history(features);
+    }
+    void set_audio_encoder(AudioEncode encoder) {
+        m_impl->set_audio_encoder(std::move(encoder));
+    }
 
     // compute position ids for language model input
     std::pair<ov::Tensor, std::optional<int64_t>> get_position_ids(const size_t inputs_embeds_size, const size_t history_size);
@@ -110,8 +127,8 @@ public:
     // gets last pruned prompt after vision token pruning
     std::string get_last_pruned_prompt(const std::string& original_prompt) const;
 
-    // set the apply_chat_template flag, which determines whether chat template should be applied for non-chat scenarios
-    void set_apply_chat_template_status(bool apply_chat_template);
+    // Configure template application, including prompts already formatted by the caller.
+    void set_apply_chat_template_status(bool apply_chat_template, bool prompt_is_templated = false);
 
     // finishes chat and clears a chat history
     void finish_chat();
@@ -152,6 +169,8 @@ private:
         // Chat history
         // True if chat template should be applied for non-chat scenario
         bool m_apply_chat_template = true;
+        // The caller may already have formatted the prompt with the chat template.
+        bool m_prompt_is_templated = false;
         // Finish reason of last generation for chat scenario
         ov::genai::GenerationStatus m_chat_generation_finish_status = ov::genai::GenerationStatus::RUNNING;
         // reflection of tokens contained in the kv cache
@@ -192,7 +211,14 @@ private:
             const std::vector<VideoMetadata>& videos_metadata = {}
         );
 
-        virtual void encode_audios(const std::vector<ov::Tensor>& audios) {}
+        virtual void encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) {}
+        virtual std::vector<ov::Tensor> get_audio_features() const {
+            return {};
+        }
+        virtual void set_audio_history(const std::vector<ov::Tensor>&) {}
+        virtual void set_audio_encoder(AudioEncode) {
+            OPENVINO_THROW("This family has no audio adapter");
+        }
 
         virtual std::pair<ov::Tensor, std::optional<int64_t>> get_position_ids(const size_t inputs_embeds_size, const size_t history_size);
         
@@ -227,8 +253,9 @@ private:
             return m_cache_state;
         }
 
-        void set_apply_chat_template_status(bool apply_chat_template) {
+        void set_apply_chat_template_status(bool apply_chat_template, bool prompt_is_templated = false) {
             m_apply_chat_template = apply_chat_template;
+            m_prompt_is_templated = prompt_is_templated;
         }
 
         /**
@@ -269,6 +296,12 @@ private:
             const std::vector<EncodedVideo>& videos) const;
 
     protected:
+        IInputsEmbedder(const VLMConfig& config,
+                        const Tokenizer& tokenizer,
+                        const VisionEncoder::Ptr& vision,
+                        const EmbeddingsModel::Ptr& embeddings,
+                        const std::string& device);
+
         IInputsEmbedder(
             const VLMConfig& vlm_config,
             const std::filesystem::path& model_dir,

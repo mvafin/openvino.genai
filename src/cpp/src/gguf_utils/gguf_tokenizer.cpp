@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <regex>
 #include <set>
 
 #include "openvino/frontend/gguf/tokenizer_metadata.hpp"
@@ -1109,6 +1110,11 @@ void erase_gguf_tokenizer_metadata(const std::shared_ptr<ov::Model>& model) {
 
 std::string patch_gguf_chat_template(const std::string& chat_template) {
     std::string patched_chat_template = chat_template;
+    // GGUF tokenizers are also used directly by LLMPipeline, without a family embedder
+    // to adapt these Qwen and Gemma Jinja constructs to minja.
+    patched_chat_template =
+        std::regex_replace(patched_chat_template, std::regex{R"((\b[\w\.]+)\s+is\s+undefined)"}, "not $1 is defined");
+    patched_chat_template = std::regex_replace(patched_chat_template, std::regex{R"("[ \t]*\r?\n[ \t]*")"}, "");
     // Define the exact pattern to find in original chat_template
     // Using C++ raw string literals (R"(...)") to correctly represent the literal content,
     const std::string qwen2_5_substring_to_find = R"({{\"name\": <function-name>, \"arguments\": <args-json-object>}})";

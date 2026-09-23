@@ -19,6 +19,12 @@ public:
 
 class InputsEmbedderQwen3_5 : public InputsEmbedderQwen3VL {
 public:
+    InputsEmbedderQwen3_5(const VLMConfig& config,
+                          const Tokenizer& tokenizer,
+                          const VisionEncoder::Ptr& vision,
+                          const EmbeddingsModel::Ptr& embeddings,
+                          const std::string& device);
+
     InputsEmbedderQwen3_5(
         const VLMConfig& vlm_config,
         const std::filesystem::path& model_dir,

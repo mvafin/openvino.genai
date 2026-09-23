@@ -85,6 +85,44 @@ void InputsEmbedder::IInputsEmbedder::finish_chat() {
     m_cache_state.reset_state();
 }
 
+InputsEmbedder::IInputsEmbedder::IInputsEmbedder(const VLMConfig& config,
+                                                 const Tokenizer& tokenizer,
+                                                 const VisionEncoder::Ptr& vision,
+                                                 const EmbeddingsModel::Ptr& embeddings,
+                                                 const std::string& device)
+    : m_vlm_config(config),
+      m_vision_encoder(vision),
+      m_embedding(embeddings),
+      m_tokenizer(tokenizer),
+      m_pruning_processor(std::make_shared<VisionTokenPruningProcessor>(device)) {}
+
+InputsEmbedder::InputsEmbedder(const VLMConfig& config,
+                               const Tokenizer& tokenizer,
+                               const VisionEncoder::Ptr& vision,
+                               const EmbeddingsModel::Ptr& embeddings,
+                               const std::string& device,
+                               bool retain_token_ids) {
+    switch (config.model_type) {
+    case VLMModelType::GEMMA3:
+        m_impl = std::make_shared<InputsEmbedderGemma3>(config, tokenizer, vision, embeddings, device);
+        break;
+    case VLMModelType::GEMMA4:
+    case VLMModelType::GEMMA4_UNIFIED:
+        m_impl =
+            std::make_shared<InputsEmbedderGemma4>(config, tokenizer, vision, embeddings, device, retain_token_ids);
+        break;
+    case VLMModelType::MUSE_GLIMMER:
+        m_impl = std::make_shared<InputsEmbedderMuseGlimmer>(config, tokenizer, vision, embeddings, device);
+        break;
+    case VLMModelType::QWEN3_5:
+    case VLMModelType::QWEN3_5_MOE:
+        m_impl = std::make_shared<InputsEmbedderQwen3_5>(config, tokenizer, vision, embeddings, device);
+        break;
+    default:
+        OPENVINO_THROW("GGUF multimodal pipeline adapter is not implemented for this model family");
+    }
+}
+
 InputsEmbedder::IInputsEmbedder::IInputsEmbedder(
         const VLMConfig& vlm_config,
         const std::filesystem::path& model_dir,
@@ -123,7 +161,9 @@ InputsEmbedder::IInputsEmbedder::IInputsEmbedder(
     m_pruning_processor(std::make_shared<VisionTokenPruningProcessor>(device)) { }
 
 ov::Tensor InputsEmbedder::IInputsEmbedder::apply_chat_template_tokenize(const std::string& prompt, ov::genai::VLMPerfMetrics& metrics) {
-    bool add_special_tokens = m_add_special_tokens_is_set ? m_add_special_tokens : !(m_is_chat_conversation || m_apply_chat_template);
+    const bool add_special_tokens =
+        m_add_special_tokens_is_set ? m_add_special_tokens
+                                   : !(m_is_chat_conversation || m_apply_chat_template || m_prompt_is_templated);
     ManualTimer encode_timer("Encode");
     encode_timer.start();
 
@@ -474,8 +514,8 @@ std::vector<ov::genai::EncodedVideo> InputsEmbedder::encode_videos(
     return m_impl->encode_videos(videos, videos_metadata);
 }
 
-void InputsEmbedder::encode_audios(const std::vector<ov::Tensor>& audios) {
-    m_impl->encode_audios(audios);
+void InputsEmbedder::encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) {
+    m_impl->encode_audios(audios, append_to_history);
 }
 
 std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedder::get_position_ids(const size_t inputs_embeds_size, const size_t history_size) {
@@ -518,8 +558,8 @@ void InputsEmbedder::update_chat_history(const std::string& decoded_results, con
     m_impl->update_chat_history(decoded_results, generation_finish_status);
 }
 
-void InputsEmbedder::set_apply_chat_template_status(bool apply_chat_template) {
-    m_impl->set_apply_chat_template_status(apply_chat_template);
+void InputsEmbedder::set_apply_chat_template_status(bool apply_chat_template, bool prompt_is_templated) {
+    m_impl->set_apply_chat_template_status(apply_chat_template, prompt_is_templated);
 }
 
 void InputsEmbedder::finish_chat() {

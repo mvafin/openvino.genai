@@ -23,12 +23,18 @@ public:
 
     EncodedVideo encode_frames(const std::vector<ov::Tensor>& frames) override;
 
-private:
-    EncodedImage encode_with_config(const ov::Tensor& image, const ProcessorConfig& config);
+protected:
+    virtual EncodedImage encode_with_config(const ov::Tensor& image, const ProcessorConfig& config);
 };
 
 class InputsEmbedderGemma4 : public InputsEmbedder::IInputsEmbedder {
 public:
+    InputsEmbedderGemma4(const VLMConfig& config,
+                         const Tokenizer& tokenizer,
+                         const VisionEncoder::Ptr& vision,
+                         const EmbeddingsModel::Ptr& embeddings,
+                         const std::string& device,
+                         bool retain_token_ids);
     InputsEmbedderGemma4(const VLMConfig& vlm_config,
                          const std::filesystem::path& model_dir,
                          const Tokenizer& tokenizer,
@@ -59,6 +65,21 @@ public:
         const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count = {}) override;
 
     std::vector<ov::genai::EncodedImage> encode_images(const std::vector<ov::Tensor>& images) override;
+    void encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) override;
+    std::vector<ov::Tensor> get_audio_features() const override {
+        return m_audio_features;
+    }
+    void set_audio_history(const std::vector<ov::Tensor>& features) override {
+        m_audio_history = features;
+        m_audio_features.clear();
+        m_audio_history_before_turn = features.size();
+        m_audio_chat = true;
+    }
+    void finish_chat() override;
+    void update_chat_history(const std::string& decoded_results, GenerationStatus status) override;
+    void set_audio_encoder(AudioEncode encoder) override {
+        m_audio_encoder = std::move(encoder);
+    }
 
     std::vector<ov::genai::EncodedVideo> encode_videos(const std::vector<ov::Tensor>& videos,
                                                        const std::vector<VideoMetadata>& videos_metadata = {}) override;
@@ -86,6 +107,12 @@ public:
     }
 
 private:
+    bool m_retain_token_ids = false;
+    AudioEncode m_audio_encoder;
+    std::vector<ov::Tensor> m_audio_features, m_audio_history;
+    size_t m_audio_history_before_turn = 0;
+    bool m_audio_chat = false;
+    int64_t m_audio_token_id = -1;
     // Per-layer text embeddings model (Gemma4-specific)
     std::unique_ptr<CircularBufferQueue<ov::InferRequest>> m_per_layer_embeddings_requests = nullptr;
 

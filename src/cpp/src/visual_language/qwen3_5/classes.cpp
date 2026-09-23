@@ -6,6 +6,15 @@
 
 namespace ov::genai {
 
+InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(const VLMConfig& config,
+                                             const Tokenizer& tokenizer,
+                                             const VisionEncoder::Ptr& vision,
+                                             const EmbeddingsModel::Ptr& embeddings,
+                                             const std::string& device)
+    : InputsEmbedderQwen3VL(config, tokenizer, vision, embeddings, device) {
+    patch_chat_template();
+}
+
 InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(
     const VLMConfig& vlm_config,
     const std::filesystem::path& model_dir,

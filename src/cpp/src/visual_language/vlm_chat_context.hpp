@@ -38,6 +38,7 @@ public:
         bool needs_kv_cache_reset = false;
 
         float vision_encoding_duration = 0.0f;
+        float audio_encoding_duration = 0.0f;
     };
 
     VLMChatContext(
@@ -46,11 +47,10 @@ public:
         InputsEmbedder& embedder
     );
 
-    ProcessedChatData process(
-        const std::vector<ov::Tensor>& new_images,
-        const std::vector<ov::Tensor>& new_videos = {},
-        const std::vector<VideoMetadata>& new_videos_metadata = {}
-    );
+    ProcessedChatData process(const std::vector<ov::Tensor>& new_images,
+                              const std::vector<ov::Tensor>& new_videos = {},
+                              const std::vector<VideoMetadata>& new_videos_metadata = {},
+                              const std::vector<ov::Tensor>& new_audios = {});
 
     void rollback();
 
@@ -71,12 +71,13 @@ private:
         const std::vector<size_t>& video_indices,
         const std::vector<VideoMetadata>& videos_metadata = {}
     );
-                
-    void fill_messages_metadata(
-        size_t start_index,
-        const std::vector<size_t>& new_image_indices,
-        const std::vector<size_t>& new_video_indices
-    );
+
+    void restore_audio_history();
+
+    float fill_messages_metadata(size_t start_index,
+                                 const std::vector<size_t>& new_image_indices,
+                                 const std::vector<size_t>& new_video_indices,
+                                 const std::vector<ov::Tensor>& new_audios);
 
     std::string multipart_message_to_string(
         const JsonContainer& message,

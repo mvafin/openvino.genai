@@ -30,6 +30,20 @@
 
 namespace ov::genai {
 
+VisionEncoder::VisionEncoder(const std::shared_ptr<ov::Model>& model,
+                             const ProcessorConfig& processor,
+                             const std::string& device,
+                             const ov::AnyMap& properties)
+    : m_processor_config(processor) {
+    auto compiled = utils::singleton_core().compile_model(
+        model, device, utils::get_model_properties(properties, "vision_embeddings", device));
+    m_ireq_queue_vision_encoder = std::make_unique<CircularBufferQueue<ov::InferRequest>>(
+        compiled.get_property(ov::optimal_number_of_infer_requests),
+        [&compiled] {
+            return compiled.create_infer_request();
+        });
+}
+
 VisionEncoder::VisionEncoder(const std::filesystem::path& model_dir, const std::string& device, const ov::AnyMap properties) {
     auto compiled_model = utils::singleton_core().compile_model(
         model_dir / "openvino_vision_embeddings_model.xml", device,

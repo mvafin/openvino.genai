@@ -93,7 +93,7 @@ public:
 
     /// @brief Encode raw audio tensors and cache the embeddings.
     /// Must be called before get_inputs_embeds() if audio is present.
-    void encode_audios(const std::vector<ov::Tensor>& audios) override;
+    void encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) override;
 
     /// @brief Check if audio encoder model was loaded and is ready for inference.
     bool has_audio_encoder() const {
