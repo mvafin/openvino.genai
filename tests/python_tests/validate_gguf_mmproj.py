@@ -46,6 +46,8 @@ def main():
     parser.add_argument("--video-frames", type=int, default=0, help="Also compare a short synthetic video (Qwen/Gemma)")
     parser.add_argument("--audio", type=Path, help="Also compare audio and mixed image/audio requests (16 kHz mono WAV)")
     parser.add_argument("--api-checks", action="store_true", help="Check beam search, modern chat, streaming cancellation and reset")
+    parser.add_argument("--multi-media", action="store_true", help="Compare two images and, when available, two audio inputs")
+    parser.add_argument("--audio-boundaries", action="store_true", help="Compare audio immediately before and after the 30-second chunk boundary")
     parser.add_argument("--chat", action="store_true", help="Also compare a cached image chat follow-up")
     parser.add_argument("--family", choices=("gemma3", "gemma4", "qwen35", "muse"), default="gemma3")
     parser.add_argument("--attention-backend", choices=("SDPA", "PA"), default="SDPA")
@@ -54,6 +56,7 @@ def main():
               "reference_revision": REFERENCE_REVISION, "family": args.family,
               "reference_language": str(args.reference_language or args.language),
               "audio": str(args.audio) if args.audio else None,
+              "multi_media": args.multi_media, "audio_boundaries": args.audio_boundaries,
               "attention_backend": args.attention_backend,
               "openvino_version": ov.get_version(), "genai_version": genai.__version__,
               "validator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -172,6 +175,41 @@ def run(args, report):
                 reference_prompt = prompt.replace(image_marker, "<__media__>").replace("<|audio|>", "<__media__>")
                 compare([{"role": "user", "content": reference_prompt}], stream.tokens,
                         result.texts[0], "mixed" if mixed else "audio", mixed, True)
+        if args.multi_media:
+            second_pixels = np.ascontiguousarray(pixels.transpose(1, 0, 2))
+            second_file = directory / "image2.png"
+            Image.fromarray(second_pixels).save(second_file)
+            prompt = image_marker + "\n" + image_marker + "\nCompare these images."
+            stream = Tokens()
+            result = pipe.generate(prompt, images=[ov.Tensor(pixels[None]), ov.Tensor(second_pixels[None])],
+                                   max_new_tokens=20, do_sample=False, streamer=stream)
+            compare([{"role": "user", "content": prompt.replace(image_marker, "<__media__>")}],
+                    stream.tokens, result.texts[0], "multi_image", False,
+                    media_override=[str(image_file), str(second_file)])
+        if args.audio and (args.multi_media or args.audio_boundaries):
+            def audio_file(samples, name):
+                file = directory / (name + ".wav")
+                with wave.open(str(file), "wb") as output:
+                    output.setnchannels(1)
+                    output.setsampwidth(2)
+                    output.setframerate(16000)
+                    output.writeframes((samples * 32768).astype("<i2").tobytes())
+                return str(file)
+
+            extra_audios = []
+            if args.multi_media:
+                extra_audios.append(("multi_audio", [waveform, np.ascontiguousarray(waveform[::-1])]))
+            if args.audio_boundaries:
+                for length in (30 * 16000 - 1, 30 * 16000 + 321):
+                    extra_audios.append((f"audio_samples_{length}", [np.resize(waveform, length)]))
+            for name, samples in extra_audios:
+                prompt = "<|audio|>\n" * len(samples) + "Transcribe the audio."
+                stream = Tokens()
+                result = pipe.generate(prompt, audios=[ov.Tensor(sample) for sample in samples],
+                                       max_new_tokens=20, do_sample=False, streamer=stream)
+                files = [audio_file(sample, f"{name}_{i}") for i, sample in enumerate(samples)]
+                compare([{"role": "user", "content": prompt.replace("<|audio|>", "<__media__>")}],
+                        stream.tokens, result.texts[0], name, False, media_override=files)
         chat_reset_matches = True
         if args.chat:
             pipe.start_chat()
