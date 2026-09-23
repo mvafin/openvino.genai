@@ -60,6 +60,12 @@ private:
 
 class InputsEmbedderQwen2VL : public InputsEmbedder::IInputsEmbedder {
 public:
+    InputsEmbedderQwen2VL(const VLMConfig& config,
+                          const Tokenizer& tokenizer,
+                          const VisionEncoder::Ptr& vision,
+                          const EmbeddingsModel::Ptr& embeddings,
+                          const std::string& device);
+
     InputsEmbedderQwen2VL(
         const VLMConfig& vlm_config,
         const std::filesystem::path& model_dir,
@@ -135,6 +141,7 @@ protected:
     size_t m_merge_length;
 
     bool m_with_cu_seqlens_input = false;
+    bool m_vision_is_projected = false;
 
     virtual void expand_video_tags_in_prompt(
         std::string& unified_prompt,

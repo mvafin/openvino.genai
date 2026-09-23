@@ -525,7 +525,7 @@ InputsEmbedderQwen3Omni::InputsEmbedderQwen3Omni(const VLMConfig& vlm_config,
     }
 }
 
-void InputsEmbedderQwen3Omni::encode_audios(const std::vector<ov::Tensor>& audios) {
+void InputsEmbedderQwen3Omni::encode_audios(const std::vector<ov::Tensor>& audios, bool) {
     if (audios.empty() || !has_audio_encoder()) {
         m_audio_embeddings = ov::Tensor();
         return;

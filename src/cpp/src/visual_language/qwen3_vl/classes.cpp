@@ -580,6 +580,12 @@ std::pair<ov::Tensor, ov::Tensor> InputsEmbedderQwen3VL::run_video_image_embeddi
     const std::vector<size_t>& images_sequence,
     const std::vector<EncodedVideo>& videos,
     const std::vector<size_t>& videos_sequence) {
+    if (m_vision_is_projected) {
+        return InputsEmbedderQwen2VL::run_video_image_embeddings_merger(images,
+                                                                        images_sequence,
+                                                                        videos,
+                                                                        videos_sequence);
+    }
     auto [reordered_image_embeds, reordered_images_grid_thw] =
         qwen2_vl_utils::reorder_image_embeds_and_grid_thw(images, images_sequence);
     auto [reordered_video_embeds, reordered_videos_grid_thw] =

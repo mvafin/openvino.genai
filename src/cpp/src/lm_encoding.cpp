@@ -273,6 +273,8 @@ ov::genai::utils::GenerationFinishInfo get_lm_encoded_results(
                     m_llm.set_tensor(name, new_visual_pos_masks);
                 } else if (name == "per_layer_inputs" && per_layer_embeddings_callback) {
                     m_llm.set_tensor(name, per_layer_embeddings_callback(new_input_ids));
+                } else if (name == "input_ids") {
+                    m_llm.set_tensor(name, new_input_ids);
                 } else if (name == "token_type_ids") {
                     ov::Tensor new_token_type_ids(tensor.get_element_type(), {total_num_tokens, 1});
                     std::fill_n(new_token_type_ids.data<int64_t>(), new_token_type_ids.get_size(), 0);

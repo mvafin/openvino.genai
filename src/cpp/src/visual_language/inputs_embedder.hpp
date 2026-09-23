@@ -22,6 +22,7 @@
 
 namespace ov::genai {
 struct VLMPerfMetrics;
+using AudioEncode = std::function<std::vector<ov::Tensor>(const ov::Tensor&)>;
 
 const static std::regex UNIVERSAL_IMAGE_PATTERN{R"(<ov_genai_image_(\d+)>)"};
 const static std::regex UNIVERSAL_VIDEO_PATTERN{R"(<ov_genai_video_(\d+)>)"};
@@ -38,7 +39,8 @@ public:
                    const Tokenizer& tokenizer,
                    const VisionEncoder::Ptr& vision,
                    const EmbeddingsModel::Ptr& embeddings,
-                   const std::string& device);
+                   const std::string& device,
+                   bool retain_token_ids = false);
 
     InputsEmbedder(const std::filesystem::path& model_dir,
                    const Tokenizer& tokenizer,
@@ -79,7 +81,16 @@ public:
         const std::vector<VideoMetadata>& videos_metadata = {}
     );
 
-    void encode_audios(const std::vector<ov::Tensor>& audios);
+    void encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history = false);
+    std::vector<ov::Tensor> get_audio_features() const {
+        return m_impl->get_audio_features();
+    }
+    void set_audio_history(const std::vector<ov::Tensor>& features) {
+        m_impl->set_audio_history(features);
+    }
+    void set_audio_encoder(AudioEncode encoder) {
+        m_impl->set_audio_encoder(std::move(encoder));
+    }
 
     // compute position ids for language model input
     std::pair<ov::Tensor, std::optional<int64_t>> get_position_ids(const size_t inputs_embeds_size, const size_t history_size);
@@ -198,7 +209,14 @@ private:
             const std::vector<VideoMetadata>& videos_metadata = {}
         );
 
-        virtual void encode_audios(const std::vector<ov::Tensor>& audios) {}
+        virtual void encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) {}
+        virtual std::vector<ov::Tensor> get_audio_features() const {
+            return {};
+        }
+        virtual void set_audio_history(const std::vector<ov::Tensor>&) {}
+        virtual void set_audio_encoder(AudioEncode) {
+            OPENVINO_THROW("This family has no audio adapter");
+        }
 
         virtual std::pair<ov::Tensor, std::optional<int64_t>> get_position_ids(const size_t inputs_embeds_size, const size_t history_size);
         

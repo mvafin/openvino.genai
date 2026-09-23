@@ -22,11 +22,10 @@ VLMChatContext::VLMChatContext(
     m_initial_base_video_index = m_history_state->get_base_video_index();
 }
 
-VLMChatContext::ProcessedChatData VLMChatContext::process(
-    const std::vector<ov::Tensor>& new_images,
-    const std::vector<ov::Tensor>& new_videos,
-    const std::vector<VideoMetadata>& new_videos_metadata
-) {
+VLMChatContext::ProcessedChatData VLMChatContext::process(const std::vector<ov::Tensor>& new_images,
+                                                          const std::vector<ov::Tensor>& new_videos,
+                                                          const std::vector<VideoMetadata>& new_videos_metadata,
+                                                          const std::vector<ov::Tensor>& new_audios) {
     ProcessedChatData result;
     
     const size_t matching_history_length = m_history_state->find_matching_history_length(m_history);
@@ -34,6 +33,7 @@ VLMChatContext::ProcessedChatData VLMChatContext::process(
 
     if (history_modified) {
         m_history_state->truncate_to(matching_history_length);
+        m_initial_messages_metadata_count = matching_history_length;
         m_initial_base_image_index = m_history_state->get_base_image_index();
         m_initial_base_video_index = m_history_state->get_base_video_index();
     }
@@ -45,9 +45,11 @@ VLMChatContext::ProcessedChatData VLMChatContext::process(
     vision_encoding_timer.start();
     encode_visions_if_needed(new_image_indices, new_video_indices, new_videos_metadata);
     vision_encoding_timer.end();
-    
-    fill_messages_metadata(matching_history_length, new_image_indices, new_video_indices);
-    
+
+    result.audio_encoding_duration =
+        fill_messages_metadata(matching_history_length, new_image_indices, new_video_indices, new_audios);
+    restore_audio_history();
+
     result.normalized_history = m_history_state->build_normalized_history(m_history);
     
     auto resolved_visions = m_history_state->resolve_visions_with_sequence();
@@ -82,6 +84,7 @@ VLMChatContext::ProcessedChatData VLMChatContext::process(
 
 void VLMChatContext::rollback() {
      m_history_state->truncate_to(m_initial_messages_metadata_count);
+     restore_audio_history();
      m_initial_base_image_index = m_history_state->get_base_image_index();
      m_initial_base_video_index = m_history_state->get_base_video_index();
 }
@@ -120,11 +123,19 @@ void VLMChatContext::encode_visions_if_needed(
     }
 }
 
-void VLMChatContext::fill_messages_metadata(
-    size_t start_index,
-    const std::vector<size_t>& new_image_indices,
-    const std::vector<size_t>& new_video_indices
-) {
+void VLMChatContext::restore_audio_history() {
+    std::vector<ov::Tensor> features;
+    for (const auto& message : m_history_state->get_messages_metadata()) {
+        features.insert(features.end(), message.audio_features.begin(), message.audio_features.end());
+    }
+    m_inputs_embedder.set_audio_history(features);
+}
+
+float VLMChatContext::fill_messages_metadata(size_t start_index,
+                                             const std::vector<size_t>& new_image_indices,
+                                             const std::vector<size_t>& new_video_indices,
+                                             const std::vector<ov::Tensor>& new_audios) {
+    float audio_encoding_duration = 0.0f;
     size_t base_image_index = m_initial_base_image_index;
     size_t base_video_index = m_initial_base_video_index;
 
@@ -147,7 +158,15 @@ void VLMChatContext::fill_messages_metadata(
             metadata.provided_image_indices = new_image_indices;
             metadata.provided_video_indices = new_video_indices;
         }
-        
+
+        ManualTimer audio_timer("Audio Encoding");
+        audio_timer.start();
+        m_inputs_embedder.encode_audios(
+            i == m_history_state->get_last_user_message_index() ? new_audios : std::vector<ov::Tensor>{});
+        audio_timer.end();
+        audio_encoding_duration += audio_timer.get_duration_microsec();
+        metadata.audio_features = m_inputs_embedder.get_audio_features();
+
         std::vector<EncodedImage> encoded_images = m_history_state->get_encoded_images(metadata.provided_image_indices);
         std::vector<EncodedVideo> encoded_videos = m_history_state->get_encoded_videos(metadata.provided_video_indices);
 
@@ -182,6 +201,7 @@ void VLMChatContext::fill_messages_metadata(
         
         m_history_state->add_message_metadata(std::move(metadata));
     }
+    return audio_encoding_duration;
 }
 
 /**

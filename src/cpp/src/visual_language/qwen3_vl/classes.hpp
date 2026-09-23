@@ -21,6 +21,8 @@ public:
 
 class InputsEmbedderQwen3VL : public InputsEmbedderQwen2VL {
 public:
+    using InputsEmbedderQwen2VL::InputsEmbedderQwen2VL;
+
     InputsEmbedderQwen3VL(const VLMConfig& vlm_config,
                           const std::filesystem::path& model_dir,
                           const Tokenizer& tokenizer,

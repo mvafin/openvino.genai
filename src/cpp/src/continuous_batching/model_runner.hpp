@@ -560,6 +560,9 @@ public:
         if (sequence_group_type == SequenceGroupType::EMBEDDINGS) {
             inputs_embeds_data = inputs_embeds.data<float>();
             token_type_ids_data = token_type_ids.data<int64_t>();
+            if (m_cached_input_ids) {
+                input_ids_data = input_ids.data<int64_t>();
+            }
 
             ov::Shape position_ids_shape;
             if (m_mtp_draft_positions) {
@@ -770,6 +773,11 @@ public:
                             position_ids_data[position_ids_idx] = position_id;
                         }
                     } else if (sequence_group_type == SequenceGroupType::EMBEDDINGS) {
+                        if (input_ids_data) {
+                            input_ids_data[token_id] = position_id < prompt_len
+                                                           ? sequence_group->get_auxiliary_input_ids()[position_id]
+                                                           : sequence->get_generated_ids()[position_id - prompt_len];
+                        }
                         const auto& generated_embeds = sequence->get_generated_ids_embeds();
                         const float* src = position_id < prompt_len ? sequence_group->get_input_embeds()[position_id].data() :  generated_embeds[position_id - prompt_len].data();
                         std::copy_n(src, hidden_size, inputs_embeds_data + token_id * hidden_size);
@@ -850,6 +858,9 @@ public:
                     input_ids_data += num_scheduled_tokens;
                 } else if (sequence_group_type == SequenceGroupType::EMBEDDINGS) {
                     inputs_embeds_data += num_scheduled_tokens * hidden_size;
+                    if (input_ids_data) {
+                        input_ids_data += num_scheduled_tokens;
+                    }
 
                     if (have_token_type_ids)
                         token_type_ids_data += num_scheduled_tokens;

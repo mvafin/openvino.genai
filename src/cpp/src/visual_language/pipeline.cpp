@@ -26,12 +26,43 @@
 #include "visual_language/vlm_utils.hpp"
 #ifdef ENABLE_GGUF
 #    include "gguf_utils/gguf_multimodal.hpp"
-#    include "visual_language/gemma3/classes.hpp"
 #endif
 
 using namespace ov::genai;
 
 namespace {
+#ifdef ENABLE_GGUF
+std::shared_ptr<InputsEmbedder> create_gguf_inputs_embedder(const GGUFMultimodalModels& models,
+                                                            const std::string& device,
+                                                            const ov::AnyMap& properties) {
+    auto vision = create_gguf_vision_encoder(models, device, properties);
+    auto embeddings = std::make_shared<EmbeddingsModel>(models.text_embeddings, device, properties);
+    const auto inputs = models.language->inputs();
+    const bool retain_token_ids = std::any_of(inputs.begin(), inputs.end(), [](const auto& input) {
+        return input.get_names().count("input_ids") != 0;
+    });
+    auto embedder =
+        std::make_shared<InputsEmbedder>(models.config, models.tokenizer, vision, embeddings, device, retain_token_ids);
+    attach_gguf_audio_encoder(*embedder, models, device, properties);
+    return embedder;
+}
+
+GenerationConfig gguf_generation_config(GGUFMultimodalModels& models) {
+    GenerationConfig config;
+    config.set_eos_token_id(models.tokenizer.get_eos_token_id());
+    // Gemma's end-of-turn marker can differ from the GGUF tokenizer's EOS token.
+    const bool gemma3 = models.config.model_type == VLMModelType::GEMMA3;
+    if (gemma3 || models.config.model_type == VLMModelType::GEMMA4 ||
+        models.config.model_type == VLMModelType::GEMMA4_UNIFIED) {
+        const auto end_of_turn =
+            models.tokenizer.encode(gemma3 ? "<end_of_turn>" : "<turn|>", add_special_tokens(false));
+        OPENVINO_ASSERT(end_of_turn.input_ids.get_size() == 1, "GGUF Gemma requires a single end-of-turn token");
+        config.stop_token_ids.insert(end_of_turn.input_ids.data<const int64_t>()[0]);
+    }
+    return config;
+}
+#endif
+
 void update_npu_properties(const std::filesystem::path& models_dir, ov::AnyMap& properties) {
     auto vlm_config = utils::from_config_json_if_exists<VLMConfig>(models_dir, "config.json");
     switch (vlm_config.model_type) {
@@ -88,6 +119,7 @@ class VLMPipeline::VLMPipelineImpl : public VLMBackend{
 
     // if True, full history will be used as prompt on each chat generation
     bool m_use_full_chat_history = false;
+    std::weak_ptr<ChatHistoryInternalState> m_active_history;
     // It stores encoded images, videos and vision count in case when m_use_full_chat_history is true
     std::vector<ov::genai::EncodedImage> m_encoded_images;
     std::vector<ov::genai::EncodedVideo> m_encoded_videos;
@@ -238,10 +270,7 @@ public:
 #ifdef ENABLE_GGUF
     VLMPipelineImpl(GGUFMultimodalModels models, const std::string& device, const ov::AnyMap& properties)
         : m_vlm_config(models.config) {
-        auto vision = std::make_shared<VisionEncoderGemma3>(models.vision, models.processor, device, properties);
-        auto embeddings = std::make_shared<EmbeddingsModel>(models.text_embeddings, device, properties);
-        m_inputs_embedder =
-            std::make_shared<InputsEmbedder>(models.config, models.tokenizer, vision, embeddings, device);
+        m_inputs_embedder = create_gguf_inputs_embedder(models, device, properties);
         const auto kv_pos = utils::get_kv_axes_pos(models.language);
         // Slice-before-matmul rewrites LM logits to be produced only for the last token,
         // as on every other non-NPU path.
@@ -254,21 +283,16 @@ public:
         m_language = compiled_language_model.create_infer_request();
         m_language.get_tensor("attention_mask").set_shape({1, 0});
         finalize_initialization(models.language, kv_pos);
-        // GGUF supplies tokenizer metadata but no generation_config.json. Gemma's
-        // end-of-turn marker terminates a response independently of its EOS token.
-        const auto end_of_turn = models.tokenizer.encode("<end_of_turn>", add_special_tokens(false));
-        OPENVINO_ASSERT(end_of_turn.input_ids.get_size() == 1, "GGUF Gemma3 requires a single end-of-turn token");
-        m_generation_config.stop_token_ids.insert(end_of_turn.input_ids.data<const int64_t>()[0]);
+        m_generation_config = gguf_generation_config(models);
     }
 
     // Convert a language .gguf plus its mmproj into an impl. Kept out of VLMPipeline's
     // constructor so the shared path there has a single entry.
-    static std::shared_ptr<VLMPipelineImpl> create_gguf(const std::filesystem::path& models_dir,
-                                                        const std::string& device,
-                                                        ov::AnyMap properties,
-                                                        bool requires_paged_attention) {
+    static std::shared_ptr<VLMBackend> create_gguf(const std::filesystem::path& models_dir,
+                                                   const std::string& device,
+                                                   ov::AnyMap properties,
+                                                   bool requires_paged_attention) {
         OPENVINO_ASSERT(device == "CPU", "GGUF multimodal generation is currently qualified on CPU only");
-        OPENVINO_ASSERT(!requires_paged_attention, "GGUF multimodal generation requires the SDPA attention backend");
         const auto it = properties.find(mmproj_path.name());
         OPENVINO_ASSERT(it != properties.end(), "A language GGUF requires mmproj_path for VLMPipeline");
         const auto projector = it->second.as<std::string>();
@@ -285,6 +309,22 @@ public:
             utils::save_openvino_model(models.language, models_dir.string() + ".vlm.xml", false);
             utils::save_openvino_model(models.text_embeddings, models_dir.string() + ".embeddings.xml", false);
             utils::save_openvino_model(models.vision, projector + ".vision.xml", false);
+            if (models.audio)
+                utils::save_openvino_model(models.audio, projector + ".audio.xml", false);
+        }
+        if (requires_paged_attention) {
+            auto [plugin_properties, scheduler] =
+                utils::extract_scheduler_config(properties, utils::get_latency_oriented_scheduler_config());
+            auto embedder = create_gguf_inputs_embedder(models, device, plugin_properties);
+            auto generation_config = gguf_generation_config(models);
+            return std::make_shared<VLMContinuousBatchingAdapter>(models.language,
+                                                                  embedder,
+                                                                  models.tokenizer,
+                                                                  models.config,
+                                                                  scheduler,
+                                                                  device,
+                                                                  plugin_properties,
+                                                                  generation_config);
         }
         return std::make_shared<VLMPipelineImpl>(std::move(models), device, properties);
     }
@@ -418,7 +458,7 @@ public:
         const auto embeddings_start_time = std::chrono::steady_clock::now();
         
         const auto audio_encoding_start = std::chrono::steady_clock::now();
-        m_inputs_embedder->encode_audios(audios);
+        m_inputs_embedder->encode_audios(audios, m_is_chat_conversation);
         PerfMetrics::emplace_duration(perf_metrics.vlm_raw_metrics.audio_encoding_durations, audio_encoding_start);
 
         const auto vision_encoding_start = std::chrono::steady_clock::now();
@@ -637,11 +677,15 @@ public:
         const auto embeddings_start_time = std::chrono::steady_clock::now();
         VLMChatContext chat_context(history, m_vision_registry, *m_inputs_embedder);
 
-        auto processed_chat_data = chat_context.process(images, videos, videos_metadata);
+        auto processed_chat_data = chat_context.process(images, videos, videos_metadata, audios);
+        perf_metrics.vlm_raw_metrics.audio_encoding_durations.emplace_back(processed_chat_data.audio_encoding_duration);
 
         perf_metrics.vlm_raw_metrics.vision_encoding_durations.emplace_back(processed_chat_data.vision_encoding_duration);
 
-        bool use_full_history = processed_chat_data.needs_kv_cache_reset || m_use_full_chat_history;
+        const auto history_state = ChatHistoryInternalState::get_or_create(history, m_vision_registry);
+        bool use_full_history = processed_chat_data.needs_kv_cache_reset || m_use_full_chat_history ||
+                                m_active_history.lock() != history_state;
+        m_active_history = history_state;
 
         if (use_full_history) {
             reset_language_state();
@@ -776,6 +820,7 @@ public:
     }
 
     void finish_chat() override {
+        m_active_history.reset();
         m_is_chat_conversation = false;
         m_image_id = 0;
         m_video_id = 0;

@@ -937,6 +937,18 @@ void VisionEncoderQwen2VL::encode_frames_with_config(
     }
 }
 
+InputsEmbedderQwen2VL::InputsEmbedderQwen2VL(const VLMConfig& config,
+                                             const Tokenizer& tokenizer,
+                                             const VisionEncoder::Ptr& vision,
+                                             const EmbeddingsModel::Ptr& embeddings,
+                                             const std::string& device)
+    : IInputsEmbedder(config, tokenizer, vision, embeddings, device),
+      m_vision_is_projected(true) {
+    encode_vision_placeholder_tokens();
+    const auto merge = vision->get_processor_config().merge_size;
+    m_merge_length = merge * merge;
+}
+
 InputsEmbedderQwen2VL::InputsEmbedderQwen2VL(
     const VLMConfig& vlm_config,
     const std::filesystem::path& model_dir,
@@ -1332,6 +1344,19 @@ std::pair<ov::Tensor, ov::Tensor> InputsEmbedderQwen2VL::run_video_image_embeddi
 ) {
     auto [reordered_image_embeds, reordered_images_grid_thw] = qwen2_vl_utils::reorder_image_embeds_and_grid_thw(images, images_sequence);
     auto [reordered_video_embeds, reordered_videos_grid_thw] = qwen2_vl_utils::reorder_video_embeds_and_grid_thw(videos, videos_sequence);
+
+    if (m_vision_is_projected) {
+        auto video = qwen2_vl_utils::concatenate_video_image_embeds(reordered_video_embeds, {});
+        auto image = qwen2_vl_utils::concatenate_video_image_embeds({}, reordered_image_embeds);
+        // The assembly path expects a rank-two tensor even for an absent modality.
+        const auto& features = image ? image : video;
+        const ov::Shape empty_shape{0, features.get_shape().at(1)};
+        if (!video)
+            video = ov::Tensor(features.get_element_type(), empty_shape);
+        if (!image)
+            image = ov::Tensor(features.get_element_type(), empty_shape);
+        return {video, image};
+    }
 
     ov::Tensor concatenated_embeds = qwen2_vl_utils::concatenate_video_image_embeds(reordered_video_embeds, reordered_image_embeds);
 

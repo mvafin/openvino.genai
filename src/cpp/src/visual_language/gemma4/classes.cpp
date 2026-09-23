@@ -310,6 +310,17 @@ EncodedVideo VisionEncoderGemma4::encode_frames(const std::vector<ov::Tensor>& f
     return result;
 }
 
+InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& config,
+                                           const Tokenizer& tokenizer,
+                                           const VisionEncoder::Ptr& vision,
+                                           const EmbeddingsModel::Ptr& embeddings,
+                                           const std::string& device,
+                                           bool retain_token_ids)
+    : IInputsEmbedder(config, tokenizer, vision, embeddings, device),
+      m_retain_token_ids(retain_token_ids) {
+    patch_chat_template();
+}
+
 InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& vlm_config,
                                            const std::filesystem::path& model_dir,
                                            const Tokenizer& tokenizer,
@@ -365,6 +376,55 @@ InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& vlm_config,
         [&compiled]() -> ov::InferRequest {
             return compiled.create_infer_request();
         });
+}
+
+void InputsEmbedderGemma4::finish_chat() {
+    IInputsEmbedder::finish_chat();
+    m_audio_features.clear();
+    m_audio_history.clear();
+    m_audio_chat = false;
+}
+
+void InputsEmbedderGemma4::update_chat_history(const std::string& decoded_results, GenerationStatus status) {
+    IInputsEmbedder::update_chat_history(decoded_results, status);
+    if (status == GenerationStatus::CANCEL) {
+        m_audio_history.resize(m_audio_history_before_turn);
+        m_audio_features.clear();
+    }
+}
+
+void InputsEmbedderGemma4::encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) {
+    if (!append_to_history || !m_audio_chat)
+        m_audio_history.clear();
+    m_audio_history_before_turn = m_audio_history.size();
+    m_audio_chat = append_to_history;
+    m_audio_features.clear();
+    OPENVINO_ASSERT(audios.empty() || m_audio_encoder, "This GGUF pair has no audio encoder");
+    if (audios.empty())
+        return;
+    const auto encoded = m_tokenizer.encode("<|audio|>", add_special_tokens(false)).input_ids;
+    OPENVINO_ASSERT(encoded.get_size() == 1, "Gemma4 requires a single audio placeholder token");
+    m_audio_token_id = encoded.data<const int64_t>()[0];
+    for (const auto& audio : audios) {
+        auto chunks = m_audio_encoder(audio);
+        size_t count = 0;
+        for (const auto& chunk : chunks) {
+            const auto& shape = chunk.get_shape();
+            OPENVINO_ASSERT(chunk.get_element_type() == ov::element::f32 && shape.size() == 3 && shape[0] == 1 &&
+                                shape[2] == m_vlm_config.hidden_size,
+                            "Audio encoder must return [1, tokens, hidden_size] f32 features");
+            count += shape[1];
+        }
+        OPENVINO_ASSERT(count > 0, "Audio did not produce any encoder tokens");
+        ov::Tensor features(ov::element::f32, {1, count, m_vlm_config.hidden_size});
+        auto* dst = features.data<float>();
+        for (const auto& chunk : chunks) {
+            std::memcpy(dst, chunk.data(), chunk.get_byte_size());
+            dst += chunk.get_size();
+        }
+        m_audio_features.push_back(features);
+        m_audio_history.push_back(std::move(features));
+    }
 }
 
 std::vector<ov::genai::EncodedImage> InputsEmbedderGemma4::encode_images(const std::vector<ov::Tensor>& images) {
@@ -447,6 +507,22 @@ NormalizedPrompt InputsEmbedderGemma4::normalize_prompt(const std::string& promp
         normalize(unified_prompt, video_token, video_token, base_video_id, videos.size(), VisionType::VIDEO);
 
     expand_video_tags_in_prompt(unified_prompt, videos, videos_sequence, base_video_id);
+
+    size_t audio_offset = 0;
+    for (const auto& features : m_audio_features) {
+        std::string tag = "<|audio>";
+        for (size_t i = 0; i < features.get_shape().at(1); ++i)
+            tag += "<|audio|>";
+        tag += "<audio|>";
+        const auto pos = unified_prompt.find("<|audio|>", audio_offset);
+        if (pos == std::string::npos) {
+            unified_prompt.insert(audio_offset, tag);
+            audio_offset += tag.size();
+        } else {
+            unified_prompt.replace(pos, std::string("<|audio|>").size(), tag);
+            audio_offset = pos + tag.size();
+        }
+    }
 
     return {std::move(unified_prompt), std::move(images_sequence), std::move(videos_sequence)};
 }
@@ -575,6 +651,19 @@ ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(
 
     encode_vision_token_ids();
 
+    if (m_retain_token_ids) {
+        // GGUF retains per-layer token lookups inside the decoder. Media uses the
+        // padding row, matching llama.cpp's embedding-input branch.
+        ov::Tensor auxiliary_ids(input_ids.get_element_type(), input_ids.get_shape());
+        input_ids.copy_to(auxiliary_ids);
+        auto* ids = auxiliary_ids.data<int64_t>();
+        for (size_t i = 0; i < auxiliary_ids.get_size(); ++i) {
+            if (ids[i] == m_image_token_id || ids[i] == m_video_token_id || ids[i] == m_audio_token_id)
+                ids[i] = 0;
+        }
+        m_lm_extra_inputs["input_ids"] = std::move(auxiliary_ids);
+    }
+
     if (has_per_layer_embeddings()) {
         m_lm_extra_inputs["per_layer_inputs"] = get_per_layer_embeddings(input_ids);
     }
@@ -589,7 +678,21 @@ ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(
 
     ov::Tensor inputs_embeds(text_embeds.get_element_type(), text_embeds.get_shape());
 
-    if (image_embeds.empty() && video_embeds.empty()) {
+    // Cached SDPA decoding receives only new tokens; PA can replay the full chat.
+    // Select the corresponding suffix of encoded audios from the retained history.
+    const auto* token_data = input_ids.data<const int64_t>();
+    size_t audio_tokens = std::count(token_data, token_data + input_ids.get_size(), m_audio_token_id);
+    std::vector<ov::Tensor> audio_embeds;
+    for (auto it = m_audio_history.rbegin(); audio_tokens && it != m_audio_history.rend(); ++it) {
+        const auto count = it->get_shape().at(1);
+        OPENVINO_ASSERT(count <= audio_tokens, "Audio placeholder count does not match encoded features");
+        audio_embeds.push_back(*it);
+        audio_tokens -= count;
+    }
+    OPENVINO_ASSERT(audio_tokens == 0, "Missing encoded audio for chat history");
+    std::reverse(audio_embeds.begin(), audio_embeds.end());
+
+    if (image_embeds.empty() && video_embeds.empty() && audio_embeds.empty()) {
         text_embeds.copy_to(inputs_embeds);
         return inputs_embeds;
     }
@@ -607,6 +710,10 @@ ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(
         inputs_embeds =
             utils::merge_text_and_image_embeddings_llava(input_ids, inputs_embeds, video_embeds, m_video_token_id);
     }
+
+    if (!audio_embeds.empty())
+        inputs_embeds =
+            utils::merge_text_and_image_embeddings_llava(input_ids, inputs_embeds, audio_embeds, m_audio_token_id);
 
     return inputs_embeds;
 }

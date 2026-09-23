@@ -100,10 +100,27 @@ InputsEmbedder::InputsEmbedder(const VLMConfig& config,
                                const Tokenizer& tokenizer,
                                const VisionEncoder::Ptr& vision,
                                const EmbeddingsModel::Ptr& embeddings,
-                               const std::string& device) {
-    OPENVINO_ASSERT(config.model_type == VLMModelType::GEMMA3,
-                    "GGUF multimodal pipeline adapter is not implemented for this model family");
-    m_impl = std::make_shared<InputsEmbedderGemma3>(config, tokenizer, vision, embeddings, device);
+                               const std::string& device,
+                               bool retain_token_ids) {
+    switch (config.model_type) {
+    case VLMModelType::GEMMA3:
+        m_impl = std::make_shared<InputsEmbedderGemma3>(config, tokenizer, vision, embeddings, device);
+        break;
+    case VLMModelType::GEMMA4:
+    case VLMModelType::GEMMA4_UNIFIED:
+        m_impl =
+            std::make_shared<InputsEmbedderGemma4>(config, tokenizer, vision, embeddings, device, retain_token_ids);
+        break;
+    case VLMModelType::MUSE_GLIMMER:
+        m_impl = std::make_shared<InputsEmbedderMuseGlimmer>(config, tokenizer, vision, embeddings, device);
+        break;
+    case VLMModelType::QWEN3_5:
+    case VLMModelType::QWEN3_5_MOE:
+        m_impl = std::make_shared<InputsEmbedderQwen3_5>(config, tokenizer, vision, embeddings, device);
+        break;
+    default:
+        OPENVINO_THROW("GGUF multimodal pipeline adapter is not implemented for this model family");
+    }
 }
 
 InputsEmbedder::IInputsEmbedder::IInputsEmbedder(
@@ -495,8 +512,8 @@ std::vector<ov::genai::EncodedVideo> InputsEmbedder::encode_videos(
     return m_impl->encode_videos(videos, videos_metadata);
 }
 
-void InputsEmbedder::encode_audios(const std::vector<ov::Tensor>& audios) {
-    m_impl->encode_audios(audios);
+void InputsEmbedder::encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) {
+    m_impl->encode_audios(audios, append_to_history);
 }
 
 std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedder::get_position_ids(const size_t inputs_embeds_size, const size_t history_size) {

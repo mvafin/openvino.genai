@@ -22,9 +22,17 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     result.language = convert_gguf_with_frontend(language.string());
     result.tokenizer = Tokenizer(GGUFTokenizerParameters(take_gguf_tokenizer_metadata(result.language)), properties);
     auto combined = convert_gguf_with_frontend(mmproj.string());
-    OPENVINO_ASSERT(result.language->get_rt_info<std::string>("gguf_architecture") == "gemma3" &&
-                        combined->get_rt_info<std::string>({"gguf_mmproj", "vision.projector"}) == "gemma3",
-                    "GGUF VLMPipeline currently requires a Gemma3 language model and matching Gemma3 mmproj");
+    const auto architecture = result.language->get_rt_info<std::string>("gguf_architecture");
+    const auto projector = combined->get_rt_info<std::string>({"gguf_mmproj", "vision.projector"});
+    const bool qwen = architecture == "qwen35" || architecture == "qwen35moe";
+    const bool gemma4 = architecture == "gemma4" && (projector == "gemma4v" || projector == "gemma4uv");
+    const bool muse = architecture == "muse-glimmer" && projector == "muse-glimmer";
+    OPENVINO_ASSERT((architecture == "gemma3" && projector == "gemma3") || (qwen && projector == "qwen3vl_merger") ||
+                        gemma4 || muse,
+                    "Unsupported GGUF language/projector pair: ",
+                    architecture,
+                    " / ",
+                    projector);
 
     // Read the processor metadata off the freshly converted mmproj before the adapter pass
     // rewrites the graph, so the model can then be adapted in place instead of cloned.
@@ -51,22 +59,72 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     gguf::pass::AdaptToGenAI adapt(gguf::pass::AdaptToGenAI::InputMode::EMBEDS_TO_LOGITS);
     adapt.run_on_model(result.language);
     result.text_embeddings = adapt.get_embedding_model();
-    result.vision = std::move(combined);
+    if (gemma4 && combined->has_rt_info({"gguf_mmproj", "audio.projector"})) {
+        result.audio = combined->clone();
+        gguf::pass::AdaptMmprojToGenAI(gguf::pass::AdaptMmprojToGenAI::Modality::Audio).run_on_model(result.audio);
+    }
+    result.vision = combined;
     gguf::pass::AdaptMmprojToGenAI(gguf::pass::AdaptMmprojToGenAI::Modality::Vision).run_on_model(result.vision);
     const auto width = result.language->input("inputs_embeds").get_partial_shape()[2];
     OPENVINO_ASSERT(width == result.vision->output().get_partial_shape()[2],
                     "GGUF language and mmproj embedding widths do not match");
-    // Gemma3 scales token lookups, but llama.cpp's embedding-input route leaves image
-    // features unchanged. AdaptToGenAI retains the decoder's token scaling, so compensate
-    // projected image features before combining them with raw token embeddings.
-    auto output = result.vision->get_results().front();
-    auto features = output->input_value(0);
-    auto unscaled = std::make_shared<ov::op::v1::Multiply>(
-        features,
-        ov::op::v0::Constant::create(ov::element::f32, {}, {1.f / std::sqrt(float(width.get_length()))}));
-    unscaled->output(0).set_names(features.get_names());
-    output->input(0).replace_source_output(unscaled);
-    result.vision->validate_nodes_and_infer_types();
+    result.config.hidden_size = width.get_length();
+    result.config.scale_emb = 1.f;
+    if (muse) {
+        result.config.model_type = VLMModelType::MUSE_GLIMMER;
+        result.processor.merge_size = integer("vision.merge");
+        // llama.cpp's Muse GGUF stores the temporally collapsed image patch kernel.
+        result.processor.temporal_patch_size = 1;
+        result.processor.max_image_tokens = 4096;
+        return result;
+    }
+    if (gemma4) {
+        result.config.model_type = projector == "gemma4uv" ? VLMModelType::GEMMA4_UNIFIED : VLMModelType::GEMMA4;
+        result.processor.merge_size = integer("vision.merge");
+        if (projector == "gemma4uv") {
+            result.processor.patch_size *= combined->has_rt_info({"gguf_mmproj", "clip.vision.projector.scale_factor"})
+                                               ? integer("clip.vision.projector.scale_factor")
+                                               : 3;
+            result.processor.merge_size = 1;
+        }
+        result.config.vision_config_patch_size = result.processor.patch_size;
+        const auto factor = result.processor.patch_size * result.processor.merge_size;
+        result.processor.min_pixels = 70 * factor * factor;
+        result.processor.max_pixels = 1120 * factor * factor;
+        result.config.use_bidirectional_attention = width != 1536 && width != 2560 ? "vision" : "";
+    }
+    if (qwen) {
+        result.config.model_type = architecture == "qwen35moe" ? VLMModelType::QWEN3_5_MOE : VLMModelType::QWEN3_5;
+        result.processor.merge_size = integer("vision.merge");
+        result.processor.temporal_patch_size = 2;
+        const auto factor = result.processor.patch_size * result.processor.merge_size;
+        result.processor.min_pixels = 8 * factor * factor;
+        result.processor.max_pixels = 4096 * factor * factor;
+        for (auto entry : {std::make_pair("clip.vision.image_min_pixels", &result.processor.min_pixels),
+                           std::make_pair("clip.vision.image_max_pixels", &result.processor.max_pixels)}) {
+            if (result.vision->has_rt_info({"gguf_mmproj", entry.first}))
+                *entry.second = std::stoull(result.vision->get_rt_info<std::string>({"gguf_mmproj", entry.first}));
+        }
+        return result;
+    }
+    // Gemma scales token lookups, while llama.cpp's embedding-input route leaves
+    // media features unchanged. Compensate for the scaling retained in the decoder.
+    for (const auto& model : {result.vision, result.audio}) {
+        if (!model)
+            continue;
+        auto output = model->get_results().front();
+        auto features = output->input_value(0);
+        OPENVINO_ASSERT(features.get_partial_shape()[2] == width,
+                        "GGUF language and media embedding widths do not match");
+        auto unscaled = std::make_shared<ov::op::v1::Multiply>(
+            features,
+            ov::op::v0::Constant::create(ov::element::f32, {}, {1.f / std::sqrt(float(width.get_length()))}));
+        unscaled->output(0).set_names(features.get_names());
+        output->input(0).replace_source_output(unscaled);
+        model->validate_nodes_and_infer_types();
+    }
+    if (gemma4)
+        return result;
     result.config.model_type = VLMModelType::GEMMA3;
     result.config.hidden_size = width.get_length();
     result.config.scale_emb = 1.f;

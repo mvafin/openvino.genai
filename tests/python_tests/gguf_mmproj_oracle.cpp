@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Offline CPU reference only; never linked into GenAI.
-// Usage: oracle language.gguf mmproj.gguf image.png|- prompt.txt history.txt
+// Usage: oracle language.gguf mmproj.gguf media-file[;media-file...]|- prompt.txt history.txt
 // Reports the reference greedy choice at each step on the supplied token history.
 #include <algorithm>
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <sstream>
 #include <vector>
 
 #include "ggml-backend.h"
@@ -16,8 +17,16 @@
 #include "mtmd.h"
 
 int main(int argc, char** argv) {
-    if (argc != 6)
+    if (argc < 6 || argc > 8)
         return 2;
+    bool merge_frames = false;
+    std::string encoder_output;
+    for (int i = 6; i < argc; ++i) {
+        if (std::string(argv[i]) == "--merge-frames")
+            merge_frames = true;
+        else
+            encoder_output = argv[i];
+    }
     ggml_backend_load_all();
     llama_backend_init();
     auto mp = llama_model_default_params();
@@ -42,16 +51,35 @@ int main(int argc, char** argv) {
     std::string prompt((std::istreambuf_iterator<char>(text_file)), {});
     mtmd_input_text text{prompt.data(), prompt.size(), false, true};
     std::vector<const mtmd_bitmap*> images;
-    mtmd_helper_bitmap_wrapper bitmap{};
+    std::vector<mtmd_bitmap*> bitmaps;
     if (std::string(argv[3]) != "-") {
-        bitmap = mtmd_helper_bitmap_init_from_file(multimodal, argv[3], false);
-        if (!bitmap.bitmap)
-            return 5;
-        images.push_back(bitmap.bitmap);
+        std::istringstream paths(argv[3]);
+        std::string path;
+        while (std::getline(paths, path, ';')) {
+            auto bitmap =
+                mtmd_helper_bitmap_init_from_file(multimodal, path.c_str(), false, mtmd_helper_init_opt_default());
+            if (!bitmap.bitmap)
+                return 5;
+            mtmd_bitmap_set_mergeable(bitmap.bitmap, merge_frames);
+            bitmaps.push_back(bitmap.bitmap);
+            images.push_back(bitmap.bitmap);
+        }
     }
     auto* chunks = mtmd_input_chunks_init();
     if (mtmd_tokenize(multimodal, chunks, &text, images.data(), images.size()))
         return 6;
+    if (!encoder_output.empty()) {
+        std::ofstream output(encoder_output, std::ios::binary);
+        for (size_t i = 0; i < mtmd_input_chunks_size(chunks); ++i) {
+            const auto* chunk = mtmd_input_chunks_get(chunks, i);
+            if (mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_TEXT)
+                continue;
+            if (mtmd_encode_chunk(multimodal, chunk))
+                return 9;
+            const auto size = mtmd_input_chunk_get_n_tokens(chunk) * llama_model_n_embd_inp(model);
+            output.write(reinterpret_cast<const char*>(mtmd_get_output_embd(multimodal)), size * sizeof(float));
+        }
+    }
     llama_pos past = 0;
     if (mtmd_helper_eval_chunks(multimodal, context, chunks, 0, 0, 4096, true, &past))
         return 7;
@@ -62,11 +90,17 @@ int main(int argc, char** argv) {
         history.push_back(token);
     const auto vocab_size = llama_vocab_n_tokens(llama_model_get_vocab(model));
     std::vector<llama_token> choices;
+    auto batch = llama_batch_init(1, 0, 1);
+    batch.n_tokens = 1;
+    batch.n_seq_id[0] = 1;
+    batch.seq_id[0][0] = 0;
+    batch.logits[0] = true;
     for (size_t i = 0; i < history.size(); ++i) {
         const float* logits = llama_get_logits_ith(context, -1);
         choices.push_back(std::max_element(logits, logits + vocab_size) - logits);
         if (i + 1 < history.size()) {
-            auto batch = llama_batch_get_one(&history[i], 1);
+            batch.token[0] = history[i];
+            batch.pos[0] = past++;
             if (llama_decode(context, batch))
                 return 8;
         }
@@ -75,9 +109,10 @@ int main(int argc, char** argv) {
     for (auto choice : choices)
         std::cout << ' ' << choice;
     std::cout << '\n';
+    llama_batch_free(batch);
     mtmd_input_chunks_free(chunks);
-    if (bitmap.bitmap)
-        mtmd_bitmap_free(bitmap.bitmap);
+    for (auto* bitmap : bitmaps)
+        mtmd_bitmap_free(bitmap);
     mtmd_free(multimodal);
     llama_free(context);
     llama_model_free(model);
