@@ -8,6 +8,7 @@ Build gguf_mmproj_oracle.cpp against REFERENCE_REVISION. No llama.cpp production
 import argparse
 import json
 import hashlib
+import os
 import traceback
 import subprocess  # nosec B404
 import tempfile
@@ -39,7 +40,11 @@ def main():
     parser.add_argument("language", type=Path)
     parser.add_argument("mmproj", type=Path)
     parser.add_argument("--oracle", type=Path, required=True)
-    parser.add_argument("--reference-language", type=Path, help="Optional F32 copy of represented weights for reference inference")
+    parser.add_argument("--reference-language", type=Path, help="Alternative language checkpoint for reference inference")
+    parser.add_argument("--reference-mmproj", type=Path, help="Alternative projector checkpoint for reference inference")
+    parser.add_argument("--reference-kind", choices=("quantized", "represented-f32", "publisher-high-precision"),
+                        default="quantized")
+    parser.add_argument("--reference-manifest", type=Path, help="Pinned source and precision metadata for the reference")
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--runtime-manifest", type=Path, help="Source manifest for an immutable runtime snapshot")
     parser.add_argument("--image", type=Path)
@@ -55,6 +60,9 @@ def main():
     report = {"language": str(args.language), "mmproj": str(args.mmproj),
               "reference_revision": REFERENCE_REVISION, "family": args.family,
               "reference_language": str(args.reference_language or args.language),
+              "reference_mmproj": str(args.reference_mmproj or args.mmproj),
+              "reference_kind": args.reference_kind,
+              "q4_k_zp_f16": os.environ.get("OV_GGUF_Q4_K_ZP_F16"),
               "audio": str(args.audio) if args.audio else None,
               "multi_media": args.multi_media, "audio_boundaries": args.audio_boundaries,
               "attention_backend": args.attention_backend,
@@ -63,6 +71,8 @@ def main():
               "cases": [], "chat_checked": args.chat, "passed": False, "completed": False}
     if args.runtime_manifest:
         report["runtime_sources"] = json.loads(args.runtime_manifest.read_text())
+    if args.reference_manifest:
+        report["reference_sources"] = json.loads(args.reference_manifest.read_text())
     args.report.parent.mkdir(parents=True, exist_ok=True)
     try:
         run(args, report)
@@ -111,7 +121,7 @@ def run(args, report):
             if media_override is not None:
                 media = media_override
             process = subprocess.run([str(args.oracle.resolve()), str((args.reference_language or args.language).resolve()),
-                str(args.mmproj.resolve()), ";".join(media) if media else "-",
+                str((args.reference_mmproj or args.mmproj).resolve()), ";".join(media) if media else "-",
                 str(directory / "prompt.txt"), str(directory / "history.txt")] + (["--merge-frames"] if merge_frames else []), capture_output=True, text=True)
             (args.report.parent / f"{args.report.stem}-{modality}.log").write_text(process.stderr)
             process.check_returncode()
