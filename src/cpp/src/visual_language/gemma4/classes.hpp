@@ -33,8 +33,7 @@ public:
                          const Tokenizer& tokenizer,
                          const VisionEncoder::Ptr& vision,
                          const EmbeddingsModel::Ptr& embeddings,
-                         const std::string& device,
-                         bool retain_token_ids);
+                         const std::string& device);
     InputsEmbedderGemma4(const VLMConfig& vlm_config,
                          const std::filesystem::path& model_dir,
                          const Tokenizer& tokenizer,
@@ -107,7 +106,6 @@ public:
     }
 
 private:
-    bool m_retain_token_ids = false;
     AudioEncode m_audio_encoder;
     std::vector<ov::Tensor> m_audio_features, m_audio_history;
     size_t m_audio_history_before_turn = 0;

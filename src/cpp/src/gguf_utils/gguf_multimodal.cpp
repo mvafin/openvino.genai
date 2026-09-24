@@ -59,6 +59,10 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     gguf::pass::AdaptToGenAI adapt(gguf::pass::AdaptToGenAI::InputMode::EMBEDS_TO_LOGITS);
     adapt.run_on_model(result.language);
     result.text_embeddings = adapt.get_embedding_model();
+    for (const auto& output : result.text_embeddings->outputs()) {
+        if (output.get_names().count("per_layer_inputs"))
+            result.config.hidden_size_per_layer_input = output.get_partial_shape()[3].get_length();
+    }
     if (gemma4 && combined->has_rt_info({"gguf_mmproj", "audio.projector"})) {
         result.audio = combined->clone();
         gguf::pass::AdaptMmprojToGenAI(gguf::pass::AdaptMmprojToGenAI::Modality::Audio).run_on_model(result.audio);

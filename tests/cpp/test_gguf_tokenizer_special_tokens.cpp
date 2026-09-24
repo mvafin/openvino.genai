@@ -10,6 +10,7 @@
 #include "openvino/op/constant.hpp"
 #include "openvino/op/gather.hpp"
 #include "openvino/op/parameter.hpp"
+#include "openvino/op/reshape.hpp"
 #include "visual_language/gemma4/classes.hpp"
 #include "visual_language/vlm_chat_context.hpp"
 
@@ -99,7 +100,7 @@ TEST(GGUFMultimodal, PreformattedChatDoesNotDuplicateSpecialTokens) {
         using IInputsEmbedder::get_encoded_input_ids;
     };
     VLMConfig config;
-    TestEmbedder embedder(config, tokenizer, nullptr, nullptr, "CPU", false);
+    TestEmbedder embedder(config, tokenizer, nullptr, nullptr, "CPU");
     const auto encode = [&](const std::string& prompt) {
         VLMPerfMetrics metrics;
         auto ids = embedder.get_encoded_input_ids(prompt, metrics);
@@ -131,7 +132,7 @@ TEST(GGUFMultimodal, GemmaAudioHistoryAndResetPreserveFeaturePlacement) {
     VLMConfig config;
     config.hidden_size = 4;
     config.video_token = "<|video|>";
-    InputsEmbedderGemma4 embedder(config, tokenizer, nullptr, embeddings, "CPU", false);
+    InputsEmbedderGemma4 embedder(config, tokenizer, nullptr, embeddings, "CPU");
     embedder.set_apply_chat_template_status(false);
     embedder.set_audio_encoder([](const ov::Tensor& audio) {
         ov::Tensor features(ov::element::f32, {1, 2, 4});
@@ -167,6 +168,66 @@ TEST(GGUFMultimodal, GemmaAudioHistoryAndResetPreserveFeaturePlacement) {
     EXPECT_EQ(count_features("ab", 11.f), 0);
 }
 
+// GGUF Gemma4 text embedding models also return per_layer_inputs. Media placeholders take the
+// padding row, as in llama.cpp's embedding-input branch and optimum-intel's per-layer export.
+TEST(GGUFMultimodal, GemmaPerLayerInputsComeFromTextEmbeddingModel) {
+    using namespace ov::genai;
+    Tokenizer tokenizer(sentencepiece_config());
+    constexpr size_t layers = 2, width = 3;
+    auto ids = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{1, -1});
+    ids->output(0).set_names({"input_ids"});
+    auto axis = ov::op::v0::Constant::create(ov::element::i64, {}, {0});
+    auto table = ov::op::v0::Constant::create(ov::element::f32, {272, 4}, {0.25f});
+    auto lookup = std::make_shared<ov::op::v8::Gather>(table, ids, axis);
+    lookup->output(0).set_names({"inputs_embeds"});
+    // Row i of the per-layer table holds i, so each value identifies the looked-up token.
+    std::vector<float> rows(272 * layers * width);
+    for (size_t i = 0; i < rows.size(); ++i)
+        rows[i] = float(i / (layers * width));
+    auto per_layer_table = ov::op::v0::Constant::create(ov::element::f32, {272, layers * width}, rows);
+    auto per_layer = std::make_shared<ov::op::v1::Reshape>(
+        std::make_shared<ov::op::v8::Gather>(per_layer_table, ids, axis),
+        ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 0, layers, width}),
+        true);
+    per_layer->output(0).set_names({"per_layer_inputs"});
+    auto embedding_model =
+        std::make_shared<ov::Model>(ov::OutputVector{lookup, per_layer}, ov::ParameterVector{ids});
+    auto embeddings = std::make_shared<EmbeddingsModel>(embedding_model, "CPU", ov::AnyMap{});
+    VLMConfig config;
+    config.hidden_size = 4;
+    config.hidden_size_per_layer_input = width;
+    config.video_token = "<|video|>";
+    InputsEmbedderGemma4 embedder(config, tokenizer, nullptr, embeddings, "CPU");
+    embedder.set_apply_chat_template_status(false);
+    embedder.set_audio_encoder([](const ov::Tensor&) {
+        return std::vector<ov::Tensor>{ov::Tensor(ov::element::f32, {1, 2, 4})};
+    });
+    embedder.encode_audios({ov::Tensor(ov::element::f32, {1})}, false);
+    const auto prompt = embedder.normalize_prompt("a<|audio|>b", 0, {}).unified_prompt;
+    VLMPerfMetrics metrics;
+    const auto inputs_embeds = embedder.get_inputs_embeds(prompt, {}, metrics);
+    const auto token_ids = tokenizer.encode(prompt).input_ids;
+    const auto audio_id = tokenizer.encode("<|audio|>", add_special_tokens(false)).input_ids.data<const int64_t>()[0];
+    const auto& per_layer_inputs = embedder.get_lm_extra_inputs().at("per_layer_inputs");
+    ASSERT_EQ(per_layer_inputs.get_shape(), (ov::Shape{1, inputs_embeds.get_shape()[1], layers, width}));
+    ASSERT_EQ(token_ids.get_size(), inputs_embeds.get_shape()[1]);
+    size_t media = 0;
+    for (size_t t = 0; t < token_ids.get_size(); ++t) {
+        const auto id = token_ids.data<const int64_t>()[t];
+        media += id == audio_id;
+        const float expected = id == audio_id ? 0.f : float(id);
+        for (size_t i = 0; i < layers * width; ++i)
+            EXPECT_EQ(per_layer_inputs.data<const float>()[t * layers * width + i], expected);
+    }
+    EXPECT_EQ(media, 2);
+    // Generated tokens use the same model through the continuous-batching callback.
+    ov::Tensor generated(ov::element::i64, {1, 1});
+    generated.data<int64_t>()[0] = 9;
+    const auto decoded = embedder.get_per_layer_embeddings_callback()(generated);
+    ASSERT_EQ(decoded.get_shape(), (ov::Shape{1, 1, layers, width}));
+    EXPECT_EQ(decoded.data<const float>()[0], 9.f);
+}
+
 TEST(GGUFMultimodal, ModernAudioHistorySwitchEditAndRollback) {
     using namespace ov::genai;
     Tokenizer tokenizer(sentencepiece_config());
@@ -181,7 +242,7 @@ TEST(GGUFMultimodal, ModernAudioHistorySwitchEditAndRollback) {
     config.model_type = VLMModelType::GEMMA4;
     config.hidden_size = 4;
     config.video_token = "<|video|>";
-    InputsEmbedder embedder(config, tokenizer, nullptr, embeddings, "CPU", false);
+    InputsEmbedder embedder(config, tokenizer, nullptr, embeddings, "CPU");
     embedder.set_apply_chat_template_status(false);
     embedder.set_audio_encoder([](const ov::Tensor& audio) {
         ov::Tensor features(ov::element::f32, {1, 2, 4});

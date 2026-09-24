@@ -314,10 +314,8 @@ InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& config,
                                            const Tokenizer& tokenizer,
                                            const VisionEncoder::Ptr& vision,
                                            const EmbeddingsModel::Ptr& embeddings,
-                                           const std::string& device,
-                                           bool retain_token_ids)
-    : IInputsEmbedder(config, tokenizer, vision, embeddings, device),
-      m_retain_token_ids(retain_token_ids) {
+                                           const std::string& device)
+    : IInputsEmbedder(config, tokenizer, vision, embeddings, device) {
     patch_chat_template();
 }
 
@@ -592,7 +590,24 @@ void InputsEmbedderGemma4::expand_video_tags_in_prompt(std::string& unified_prom
 }
 
 ov::Tensor InputsEmbedderGemma4::get_per_layer_embeddings(const ov::Tensor& input_ids) {
-    OPENVINO_ASSERT(m_per_layer_embeddings_requests, "Per-layer embeddings model is not loaded");
+    if (!m_per_layer_embeddings_requests) {
+        // GGUF: per_layer_inputs come from the text embedding model; media uses the padding row.
+        ov::Tensor ids(input_ids.get_element_type(), input_ids.get_shape());
+        input_ids.copy_to(ids);
+        auto* data = ids.data<int64_t>();
+        for (size_t i = 0; i < ids.get_size(); ++i) {
+            if (data[i] == m_image_token_id || data[i] == m_video_token_id || data[i] == m_audio_token_id)
+                data[i] = 0;
+        }
+        CircularBufferQueueElementGuard<EmbeddingsRequest> guard(m_embedding->get_request_queue().get());
+        ov::InferRequest& req = guard.get().ireq;
+        req.set_tensor("input_ids", ids);
+        req.infer();
+        const ov::Tensor& output = req.get_tensor("per_layer_inputs");
+        ov::Tensor result(output.get_element_type(), output.get_shape());
+        output.copy_to(result);
+        return result;
+    }
 
     CircularBufferQueueElementGuard<ov::InferRequest> guard(m_per_layer_embeddings_requests.get());
     ov::InferRequest& req = guard.get();
@@ -650,19 +665,6 @@ ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(
     ov::Tensor input_ids = get_encoded_input_ids(prompt, metrics);
 
     encode_vision_token_ids();
-
-    if (m_retain_token_ids) {
-        // GGUF retains per-layer token lookups inside the decoder. Media uses the
-        // padding row, matching llama.cpp's embedding-input branch.
-        ov::Tensor auxiliary_ids(input_ids.get_element_type(), input_ids.get_shape());
-        input_ids.copy_to(auxiliary_ids);
-        auto* ids = auxiliary_ids.data<int64_t>();
-        for (size_t i = 0; i < auxiliary_ids.get_size(); ++i) {
-            if (ids[i] == m_image_token_id || ids[i] == m_video_token_id || ids[i] == m_audio_token_id)
-                ids[i] = 0;
-        }
-        m_lm_extra_inputs["input_ids"] = std::move(auxiliary_ids);
-    }
 
     if (has_per_layer_embeddings()) {
         m_lm_extra_inputs["per_layer_inputs"] = get_per_layer_embeddings(input_ids);

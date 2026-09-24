@@ -21,7 +21,8 @@ std::unique_ptr<ov::genai::CircularBufferQueue<ov::genai::EmbeddingsRequest>> in
         [&compiled]() -> ov::genai::EmbeddingsRequest {
             ov::genai::EmbeddingsRequest req;
             req.ireq = compiled.create_infer_request();
-            req.cpu_tensor = req.ireq.get_output_tensor();
+            // Output 0 is inputs_embeds. GGUF Gemma4 models also return per_layer_inputs.
+            req.cpu_tensor = req.ireq.get_output_tensor(0);
             ov::RemoteContext context;
             try {
                 context = compiled.get_context();
@@ -86,12 +87,12 @@ ov::Tensor EmbeddingsModel::infer(EmbeddingsRequest& req, const ov::Tensor& inpu
     OPENVINO_ASSERT(req.ireq, "Text embeddings decoder model must be compiled first. Cannot infer non-compiled model");
     req.ireq.set_input_tensor(input_idx);
     if (return_remote_tensor) {
-        req.ireq.set_output_tensor(req.remote_tensor);
+        req.ireq.set_output_tensor(0, req.remote_tensor);
     } else {
-        req.ireq.set_output_tensor(req.cpu_tensor);
+        req.ireq.set_output_tensor(0, req.cpu_tensor);
     }
     req.ireq.infer();
-    return req.ireq.get_output_tensor();
+    return req.ireq.get_output_tensor(0);
 }
 
 void EmbeddingsModel::merge_postprocess(std::shared_ptr<ov::Model> model, float scale_emb) const {

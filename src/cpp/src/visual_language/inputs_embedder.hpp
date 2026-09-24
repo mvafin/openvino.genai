@@ -39,8 +39,7 @@ public:
                    const Tokenizer& tokenizer,
                    const VisionEncoder::Ptr& vision,
                    const EmbeddingsModel::Ptr& embeddings,
-                   const std::string& device,
-                   bool retain_token_ids = false);
+                   const std::string& device);
 
     InputsEmbedder(const std::filesystem::path& model_dir,
                    const Tokenizer& tokenizer,

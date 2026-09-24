@@ -271,10 +271,14 @@ ov::genai::utils::GenerationFinishInfo get_lm_encoded_results(
                     ov::Tensor new_visual_pos_masks{tensor.get_element_type(), {batch_size, 1}};
                     std::fill_n(new_visual_pos_masks.data<bool>(), new_visual_pos_masks.get_size(), false);
                     m_llm.set_tensor(name, new_visual_pos_masks);
+                } else if (name == "per_layer_inputs" && req.ireq.get_compiled_model().outputs().size() > 1) {
+                    // GGUF embedding models also return per_layer_inputs; the callback would deadlock here.
+                    const ov::Tensor& per_layer = req.ireq.get_tensor(name);
+                    ov::Tensor per_layer_inputs(per_layer.get_element_type(), per_layer.get_shape());
+                    per_layer.copy_to(per_layer_inputs);
+                    m_llm.set_tensor(name, per_layer_inputs);
                 } else if (name == "per_layer_inputs" && per_layer_embeddings_callback) {
                     m_llm.set_tensor(name, per_layer_embeddings_callback(new_input_ids));
-                } else if (name == "input_ids") {
-                    m_llm.set_tensor(name, new_input_ids);
                 } else if (name == "token_type_ids") {
                     ov::Tensor new_token_type_ids(tensor.get_element_type(), {total_num_tokens, 1});
                     std::fill_n(new_token_type_ids.data<int64_t>(), new_token_type_ids.get_size(), 0);

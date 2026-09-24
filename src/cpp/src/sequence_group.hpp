@@ -407,7 +407,6 @@ class SequenceGroup  : public std::enable_shared_from_this<SequenceGroup> {
     TokenIds m_prompt_ids;
     std::vector<std::vector<float>> m_input_embeds;
     std::optional<std::vector<int64_t>> m_token_type_ids;
-    std::optional<TokenIds> m_auxiliary_input_ids;
 
     ov::Tensor m_deepstack_visual_embeds;
     std::optional<std::vector<bool>> m_visual_pos_masks;
@@ -514,12 +513,6 @@ public:
                             "per_layer_inputs must have shape [1, tokens, num_hidden_layers, hidden_size]");
                         m_per_layer_inputs = ov::Tensor(tensor.get_element_type(), shape);
                         tensor.copy_to(m_per_layer_inputs);
-                    } else if (input_name == "input_ids") {
-                        OPENVINO_ASSERT(
-                            tensor.get_element_type() == ov::element::i64 && tensor.get_size() == prompt_len,
-                            "Auxiliary input_ids must contain one i64 token per embedding");
-                        m_auxiliary_input_ids =
-                            TokenIds(tensor.data<const int64_t>(), tensor.data<const int64_t>() + tensor.get_size());
                     } else if (input_name == "token_type_ids") {
                         m_token_type_ids = std::vector<int64_t>(
                             tensor.data<const int64_t>(),
@@ -827,11 +820,6 @@ public:
 
     std::optional<std::vector<int64_t>> get_token_type_ids() const {
         return m_token_type_ids;
-    }
-
-    const TokenIds& get_auxiliary_input_ids() const {
-        OPENVINO_ASSERT(m_auxiliary_input_ids.has_value(), "The language model requires auxiliary input_ids");
-        return *m_auxiliary_input_ids;
     }
 
     const ov::Tensor& get_deepstack_visual_embeds() const {

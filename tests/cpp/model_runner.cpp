@@ -87,29 +87,16 @@ std::vector<int32_t> tensor_to_i32_vector(const ov::Tensor& tensor) {
 
 }  // namespace
 
-TEST(TestModelRunnerAuxiliaryTokens, media_placeholders_preserve_original_prompt_ids) {
+TEST(TestModelRunnerEmbeddingPrompt, media_placeholders_preserve_original_prompt_ids) {
     ov::Tensor embeddings(ov::element::f32, {1, 3, 4});
     TokenIds prompt{11, 999, 12};
-    TokenIds auxiliary{11, 0, 12};
     ov::Tensor prompt_tensor(ov::element::i64, {1, 3}, prompt.data());
-    ov::Tensor auxiliary_tensor(ov::element::i64, {1, 3}, auxiliary.data());
-    std::unordered_map<std::string, ov::Tensor> extra{{"input_ids", auxiliary_tensor}};
-    SequenceGroup group(0, embeddings, utils::get_greedy_config(), extra, std::nullopt, std::nullopt, prompt_tensor);
+    SequenceGroup group(0, embeddings, utils::get_greedy_config(), {}, std::nullopt, std::nullopt, prompt_tensor);
 
-    // Request storage must own both histories after the embedding assembly buffers are reused.
-    auxiliary[0] = 42;
+    // Request storage must own the prompt after the embedding assembly buffers are reused.
     prompt[0] = 43;
     EXPECT_EQ(group.get_prompt_ids(), (TokenIds{11, 999, 12}));
-    EXPECT_EQ(group.get_auxiliary_input_ids(), (TokenIds{11, 0, 12}));
     EXPECT_EQ(group.get_prompt_len(), 3);
-}
-
-TEST(TestModelRunnerAuxiliaryTokens, rejects_misaligned_auxiliary_tokens) {
-    ov::Tensor embeddings(ov::element::f32, {1, 3, 4});
-    std::unordered_map<std::string, ov::Tensor> extra{{"input_ids", ov::Tensor(ov::element::i64, {1, 2})}};
-    EXPECT_THROW(SequenceGroup(0, embeddings, utils::get_greedy_config(), extra), ov::Exception);
-    extra["input_ids"] = ov::Tensor(ov::element::i32, {1, 3});
-    EXPECT_THROW(SequenceGroup(0, embeddings, utils::get_greedy_config(), extra), ov::Exception);
 }
 
 TEST(TestModelRunnerLinearAttentionPaging, prefill_uses_read_plus_interval_write_blocks_layout) {
