@@ -123,6 +123,22 @@ class VLMPipeline::VLMPipelineImpl : public VLMBackend{
     std::string m_system_message;
     std::shared_ptr<VisionRegistry> m_vision_registry;
 private:
+    // Slice-before-matmul rewrites LM logits to be produced only for the last token.
+    // After this transformation, default path returns logits with seq_len == 1,
+    // i.e. [N, 1, vocab_size], not [N, conversation length, vocab_size].
+    void compile_language_model(const std::shared_ptr<ov::Model>& language_model,
+                                const std::string& device,
+                                const ov::AnyMap& properties) {
+        utils::apply_slice_before_matmul_transformation(language_model);
+        auto compiled =
+            utils::singleton_core().compile_model(language_model,
+                                                  device,
+                                                  utils::get_model_properties(properties, "language_model", device));
+        utils::print_compiled_model_properties(compiled, "VLM language model");
+        m_language = compiled.create_infer_request();
+        m_language.get_tensor("attention_mask").set_shape({1, 0});
+    }
+
     void finalize_initialization(
         const std::shared_ptr<ov::Model>& language_model,
         const utils::KVAxesPosition& kv_pos
@@ -251,14 +267,7 @@ private:
             m_adapter_controller = AdapterController(language_model, *m_generation_config.adapters, device);
         }
 
-        // Slice-before-matmul rewrites LM logits to be produced only for the last token.
-        // After this transformation, default path returns logits with seq_len == 1,
-        // i.e. [N, 1, vocab_size], not [N, conversation length, vocab_size].
-        utils::apply_slice_before_matmul_transformation(language_model);
-        const auto lm_properties = utils::get_model_properties(properties_copy, "language_model", device);
-        m_language = utils::singleton_core().compile_model(
-            language_model, device, lm_properties).create_infer_request();
-        m_language.get_tensor("attention_mask").set_shape({1, 0});
+        compile_language_model(language_model, device, properties_copy);
         finalize_initialization(language_model, kv_pos);
     }
 public:
@@ -266,19 +275,10 @@ public:
     VLMPipelineImpl(GGUFMultimodalModels models, const std::string& device, const ov::AnyMap& properties)
         : m_vlm_config(models.config) {
         m_inputs_embedder = create_gguf_inputs_embedder(models, device, properties);
-        const auto kv_pos = utils::get_kv_axes_pos(models.language);
-        // Slice-before-matmul rewrites LM logits to be produced only for the last token,
-        // as on every other non-NPU path.
-        utils::apply_slice_before_matmul_transformation(models.language);
-        auto compiled_language_model =
-            utils::singleton_core().compile_model(models.language,
-                                                  device,
-                                                  utils::get_model_properties(properties, "language_model", device));
-        utils::print_compiled_model_properties(compiled_language_model, "VLM language model");
-        m_language = compiled_language_model.create_infer_request();
-        m_language.get_tensor("attention_mask").set_shape({1, 0});
-        finalize_initialization(models.language, kv_pos);
         m_generation_config = gguf_generation_config(models);
+        const auto kv_pos = utils::get_kv_axes_pos(models.language);
+        compile_language_model(models.language, device, properties);
+        finalize_initialization(models.language, kv_pos);
     }
 
     // Convert a language .gguf plus its mmproj into an impl. Kept out of VLMPipeline's

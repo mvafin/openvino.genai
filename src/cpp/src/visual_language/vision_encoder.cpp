@@ -35,8 +35,11 @@ VisionEncoder::VisionEncoder(const std::shared_ptr<ov::Model>& model,
                              const std::string& device,
                              const ov::AnyMap& properties)
     : m_processor_config(processor) {
+    // Video preprocessing starts from the image settings; families override fps and frame limits.
+    static_cast<ProcessorConfig&>(m_video_processor_config) = processor;
     auto compiled = utils::singleton_core().compile_model(
         model, device, utils::get_model_properties(properties, "vision_embeddings", device));
+    ov::genai::utils::print_compiled_model_properties(compiled, "VLM vision embeddings model");
     m_ireq_queue_vision_encoder = std::make_unique<CircularBufferQueue<ov::InferRequest>>(
         compiled.get_property(ov::optimal_number_of_infer_requests),
         [&compiled] {

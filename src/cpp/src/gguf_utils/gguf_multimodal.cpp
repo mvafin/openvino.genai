@@ -3,6 +3,7 @@
 
 #include "gguf_multimodal.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <sstream>
 
@@ -74,6 +75,11 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
                     "GGUF language and mmproj embedding widths do not match");
     result.config.hidden_size = width.get_length();
     result.config.scale_emb = 1.f;
+    const auto set_pixel_bounds = [&](size_t min_tokens, size_t max_tokens) {
+        const auto factor = result.processor.patch_size * result.processor.merge_size;
+        result.processor.min_pixels = min_tokens * factor * factor;
+        result.processor.max_pixels = max_tokens * factor * factor;
+    };
     if (muse) {
         result.config.model_type = VLMModelType::MUSE_GLIMMER;
         result.processor.merge_size = integer("vision.merge");
@@ -82,32 +88,15 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
         result.processor.max_image_tokens = 4096;
         return result;
     }
-    if (gemma4) {
-        result.config.model_type = projector == "gemma4uv" ? VLMModelType::GEMMA4_UNIFIED : VLMModelType::GEMMA4;
-        result.processor.merge_size = integer("vision.merge");
-        if (projector == "gemma4uv") {
-            result.processor.patch_size *= combined->has_rt_info({"gguf_mmproj", "clip.vision.projector.scale_factor"})
-                                               ? integer("clip.vision.projector.scale_factor")
-                                               : 3;
-            result.processor.merge_size = 1;
-        }
-        result.config.vision_config_patch_size = result.processor.patch_size;
-        const auto factor = result.processor.patch_size * result.processor.merge_size;
-        result.processor.min_pixels = 70 * factor * factor;
-        result.processor.max_pixels = 1120 * factor * factor;
-        result.config.use_bidirectional_attention = width != 1536 && width != 2560 ? "vision" : "";
-    }
     if (qwen) {
         result.config.model_type = architecture == "qwen35moe" ? VLMModelType::QWEN3_5_MOE : VLMModelType::QWEN3_5;
         result.processor.merge_size = integer("vision.merge");
         result.processor.temporal_patch_size = 2;
-        const auto factor = result.processor.patch_size * result.processor.merge_size;
-        result.processor.min_pixels = 8 * factor * factor;
-        result.processor.max_pixels = 4096 * factor * factor;
+        set_pixel_bounds(8, 4096);
         for (auto entry : {std::make_pair("clip.vision.image_min_pixels", &result.processor.min_pixels),
                            std::make_pair("clip.vision.image_max_pixels", &result.processor.max_pixels)}) {
-            if (result.vision->has_rt_info({"gguf_mmproj", entry.first}))
-                *entry.second = std::stoull(result.vision->get_rt_info<std::string>({"gguf_mmproj", entry.first}));
+            if (combined->has_rt_info({"gguf_mmproj", entry.first}))
+                *entry.second = integer(entry.first);
         }
         return result;
     }
@@ -127,11 +116,26 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
         output->input(0).replace_source_output(unscaled);
         model->validate_nodes_and_infer_types();
     }
-    if (gemma4)
+    if (gemma4) {
+        result.config.model_type = projector == "gemma4uv" ? VLMModelType::GEMMA4_UNIFIED : VLMModelType::GEMMA4;
+        result.processor.merge_size = integer("vision.merge");
+        if (projector == "gemma4uv") {
+            result.processor.patch_size *= combined->has_rt_info({"gguf_mmproj", "clip.vision.projector.scale_factor"})
+                                               ? integer("clip.vision.projector.scale_factor")
+                                               : 3;
+            result.processor.merge_size = 1;
+        }
+        result.config.vision_config_patch_size = result.processor.patch_size;
+        set_pixel_bounds(70, 1120);
+        // AdaptToGenAI adds token_type_ids exactly for models with bidirectional image attention.
+        const auto& inputs = result.language->inputs();
+        const bool token_types = std::any_of(inputs.begin(), inputs.end(), [](const ov::Output<ov::Node>& input) {
+            return input.get_names().count("token_type_ids") > 0;
+        });
+        result.config.use_bidirectional_attention = token_types ? "vision" : "";
         return result;
+    }
     result.config.model_type = VLMModelType::GEMMA3;
-    result.config.hidden_size = width.get_length();
-    result.config.scale_emb = 1.f;
     // GGUF Gemma3 vocabularies do not contain HF's added <image_soft_token>.
     // Use the existing padding token only as an assembly placeholder; every occurrence
     // is replaced with a projected image vector before language-model inference.

@@ -483,6 +483,16 @@ ov::genai::GenerationConfig get_greedy_config();
 ov::genai::GenerationConfig get_multinomial_config();
 
 /**
+ * @brief Removes implicit concatenation of adjacent multiline string literals, which minja rejects.
+ */
+std::string join_multiline_string_literals(const std::string& chat_template);
+
+/**
+ * @brief Rewrites "x is undefined" as "not x is defined", since minja has no "undefined" test.
+ */
+std::string replace_is_undefined_tests(const std::string& chat_template);
+
+/**
  * @brief Patches the chat template in the provided Tokenizer and
  * removes any implicit concatenation of adjacent multiline string literals.
  */

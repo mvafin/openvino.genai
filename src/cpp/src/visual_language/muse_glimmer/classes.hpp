@@ -24,8 +24,14 @@ public:
 
     EncodedVideo encode_frames(const std::vector<ov::Tensor>& frames) override;
 
+protected:
+    // Feeds the encoder from the patchified pixels and their [1, 3] (t, h, w) grid.
+    virtual void set_encoder_inputs(ov::InferRequest& encoder,
+                                    const ov::Tensor& pixel_values,
+                                    const ov::Tensor& image_grid_thw,
+                                    const ProcessorConfig& config);
+
 private:
-    size_t m_gguf_window = 0;
     EncodedImage encode_with_config(const std::vector<ov::Tensor>& frames,
                                     const ProcessorConfig& config,
                                     size_t max_tokens);

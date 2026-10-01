@@ -63,6 +63,25 @@ ov::genai::GGUFTokenizerParameters sentencepiece_config() {
          {"add_bos_token", add_bos},
          {"chat_template", std::string("{{ bos_token }}<start_of_turn>{{ messages[0]['content'] }}<end_of_turn>")}});
 }
+constexpr size_t vocab_size = 272;  // tokens in sentencepiece_config()
+
+// input_ids -> [1, T, 4] embeddings, all 0.25.
+std::shared_ptr<ov::genai::EmbeddingsModel> constant_embeddings() {
+    auto ids = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{1, -1});
+    ids->output(0).set_names({"input_ids"});
+    auto table = ov::op::v0::Constant::create(ov::element::f32, {vocab_size, 4}, {0.25f});
+    auto lookup =
+        std::make_shared<ov::op::v8::Gather>(table, ids, ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+    auto model = std::make_shared<ov::Model>(ov::OutputVector{lookup}, ov::ParameterVector{ids});
+    return std::make_shared<ov::genai::EmbeddingsModel>(model, "CPU", ov::AnyMap{});
+}
+
+// Two audio tokens whose features all equal the first sample, so tests can trace their placement.
+std::vector<ov::Tensor> first_sample_audio_features(const ov::Tensor& audio) {
+    ov::Tensor features(ov::element::f32, {1, 2, 4});
+    std::fill_n(features.data<float>(), features.get_size(), audio.data<const float>()[0]);
+    return {features};
+}
 }  // namespace
 
 TEST(GGUFTokenizer, SentencePieceControlTokensUseTheirVocabularyIds) {
@@ -122,23 +141,13 @@ TEST(GGUFMultimodal, PreformattedChatDoesNotDuplicateSpecialTokens) {
 TEST(GGUFMultimodal, GemmaAudioHistoryAndResetPreserveFeaturePlacement) {
     using namespace ov::genai;
     Tokenizer tokenizer(sentencepiece_config());
-    auto ids = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{1, -1});
-    ids->output(0).set_names({"input_ids"});
-    auto table = ov::op::v0::Constant::create(ov::element::f32, {272, 4}, {0.25f});
-    auto lookup =
-        std::make_shared<ov::op::v8::Gather>(table, ids, ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
-    auto embedding_model = std::make_shared<ov::Model>(ov::OutputVector{lookup}, ov::ParameterVector{ids});
-    auto embeddings = std::make_shared<EmbeddingsModel>(embedding_model, "CPU", ov::AnyMap{});
+    auto embeddings = constant_embeddings();
     VLMConfig config;
     config.hidden_size = 4;
     config.video_token = "<|video|>";
     InputsEmbedderGemma4 embedder(config, tokenizer, nullptr, embeddings, "CPU");
     embedder.set_apply_chat_template_status(false);
-    embedder.set_audio_encoder([](const ov::Tensor& audio) {
-        ov::Tensor features(ov::element::f32, {1, 2, 4});
-        std::fill_n(features.data<float>(), features.get_size(), audio.data<const float>()[0]);
-        return std::vector<ov::Tensor>{features};
-    });
+    embedder.set_audio_encoder(first_sample_audio_features);
     const auto encode = [&](float value, bool chat) {
         ov::Tensor audio(ov::element::f32, {1});
         audio.data<float>()[0] = value;
@@ -177,14 +186,14 @@ TEST(GGUFMultimodal, GemmaPerLayerInputsComeFromTextEmbeddingModel) {
     auto ids = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{1, -1});
     ids->output(0).set_names({"input_ids"});
     auto axis = ov::op::v0::Constant::create(ov::element::i64, {}, {0});
-    auto table = ov::op::v0::Constant::create(ov::element::f32, {272, 4}, {0.25f});
+    auto table = ov::op::v0::Constant::create(ov::element::f32, {vocab_size, 4}, {0.25f});
     auto lookup = std::make_shared<ov::op::v8::Gather>(table, ids, axis);
     lookup->output(0).set_names({"inputs_embeds"});
     // Row i of the per-layer table holds i, so each value identifies the looked-up token.
-    std::vector<float> rows(272 * layers * width);
+    std::vector<float> rows(vocab_size * layers * width);
     for (size_t i = 0; i < rows.size(); ++i)
         rows[i] = float(i / (layers * width));
-    auto per_layer_table = ov::op::v0::Constant::create(ov::element::f32, {272, layers * width}, rows);
+    auto per_layer_table = ov::op::v0::Constant::create(ov::element::f32, {vocab_size, layers * width}, rows);
     auto per_layer = std::make_shared<ov::op::v1::Reshape>(
         std::make_shared<ov::op::v8::Gather>(per_layer_table, ids, axis),
         ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 0, layers, width}),
@@ -231,24 +240,14 @@ TEST(GGUFMultimodal, GemmaPerLayerInputsComeFromTextEmbeddingModel) {
 TEST(GGUFMultimodal, ModernAudioHistorySwitchEditAndRollback) {
     using namespace ov::genai;
     Tokenizer tokenizer(sentencepiece_config());
-    auto ids = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{1, -1});
-    ids->output(0).set_names({"input_ids"});
-    auto table = ov::op::v0::Constant::create(ov::element::f32, {272, 4}, {0.25f});
-    auto lookup =
-        std::make_shared<ov::op::v8::Gather>(table, ids, ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
-    auto embedding_model = std::make_shared<ov::Model>(ov::OutputVector{lookup}, ov::ParameterVector{ids});
-    auto embeddings = std::make_shared<EmbeddingsModel>(embedding_model, "CPU", ov::AnyMap{});
+    auto embeddings = constant_embeddings();
     VLMConfig config;
     config.model_type = VLMModelType::GEMMA4;
     config.hidden_size = 4;
     config.video_token = "<|video|>";
     InputsEmbedder embedder(config, tokenizer, nullptr, embeddings, "CPU");
     embedder.set_apply_chat_template_status(false);
-    embedder.set_audio_encoder([](const ov::Tensor& audio) {
-        ov::Tensor features(ov::element::f32, {1, 2, 4});
-        std::fill_n(features.data<float>(), features.get_size(), audio.data<const float>()[0]);
-        return std::vector<ov::Tensor>{features};
-    });
+    embedder.set_audio_encoder(first_sample_audio_features);
     auto registry = std::make_shared<VisionRegistry>();
     const auto audio = [](float value) {
         ov::Tensor tensor(ov::element::f32, {1});

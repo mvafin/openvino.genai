@@ -636,13 +636,7 @@ private:
                         sequence_group->clear_scheduled_tokens();
                         continue;
                     }
-                    auto copies = m_cache_orchestrator->append_slots(sequence_group);
-                    for (auto& [type, copy_map] : copies) {
-                        for (auto& [source, destinations] : copy_map) {
-                            auto& accumulated = typed_block_copy_map[type][source];
-                            accumulated.insert(accumulated.end(), destinations.begin(), destinations.end());
-                        }
-                    }
+                    _accumulate_block_copies(typed_block_copy_map, m_cache_orchestrator->append_slots(sequence_group));
 
                     // add information to scheduler_output
                     {
@@ -771,13 +765,7 @@ private:
                         _set_kv_paged_attention_data(scheduler_output, sequence_group, seq_id);
                     }
 
-                    for (auto& [type, copy_map] : per_type_copy_map) {
-                        auto& accumulated_copy_map = typed_block_copy_map[type];
-                        for (auto& [src_index, dst_indexes] : copy_map) {
-                            auto& accumulated_dst_indexes = accumulated_copy_map[src_index];
-                            accumulated_dst_indexes.splice(accumulated_dst_indexes.end(), dst_indexes);
-                        }
-                    }
+                    _accumulate_block_copies(typed_block_copy_map, std::move(per_type_copy_map));
 
                     // fill linear attention block tables if registered
                     if (m_cache_orchestrator->has_linear_attention_cache()) {
@@ -860,13 +848,7 @@ private:
                     sequence_group->schedule_tokens(sequence_len);
 
                     // allocate KV blocks
-                    auto copies = m_cache_orchestrator->append_slots(sequence_group);
-                    for (auto& [type, copy_map] : copies) {
-                        for (auto& [source, destinations] : copy_map) {
-                            auto& accumulated = typed_block_copy_map[type][source];
-                            accumulated.insert(accumulated.end(), destinations.begin(), destinations.end());
-                        }
-                    }
+                    _accumulate_block_copies(typed_block_copy_map, m_cache_orchestrator->append_slots(sequence_group));
 
                     // add information to scheduler_output
                     {
@@ -1255,6 +1237,16 @@ private:
             },
             plan);
         scheduler_output.set_linear_attention_paging_data(seq_id, std::move(paging_data));
+    }
+
+    using TypedBlockCopyMap = std::map<CacheType, std::map<size_t, std::list<size_t>>>;
+    static void _accumulate_block_copies(TypedBlockCopyMap& accumulated, TypedBlockCopyMap copies) {
+        for (auto& [type, copy_map] : copies) {
+            for (auto& [source, destinations] : copy_map) {
+                auto& target = accumulated[type][source];
+                target.splice(target.end(), destinations);
+            }
+        }
     }
 
     void _set_kv_paged_attention_data(Output& scheduler_output,

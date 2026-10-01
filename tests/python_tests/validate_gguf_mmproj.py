@@ -79,21 +79,27 @@ def main():
         report["completed"] = True
         report["passed"] = (report["request_reset_matches"] and report["chat_reset_matches"] and
                             all(c["passed"] for c in report.get("api_checks", {}).values()) and
-                            all(c["first_token_matches"] and c["matching_choice_fraction"] >= .9
-                                for c in report["cases"]))
+                            all(case_passed(c) for c in report["cases"]))
     except Exception:
         report["error"] = traceback.format_exc()
         print(report["error"], flush=True)
     finally:
-        args.report.write_text(json.dumps(report, indent=2) + "\n")
+        save_report(args, report)
     return 0 if report["passed"] else 1
+
+
+def case_passed(case):
+    return case["first_token_matches"] and case["matching_choice_fraction"] >= .9
+
+
+def save_report(args, report):
+    args.report.write_text(json.dumps(report, indent=2) + "\n")
 
 
 def run(args, report):
     image_marker = {"gemma3": "<start_of_image>", "gemma4": "<|image|>", "muse": "<|image|>",
                     "qwen35": "<|vision_start|><|image_pad|><|vision_end|>"}[args.family]
     image_prompt = image_marker + "\nDescribe the image."
-    args.report.parent.mkdir(parents=True, exist_ok=True)
     pipe = genai.VLMPipeline(str(args.language), "CPU", mmproj_path=str(args.mmproj),
                             ATTENTION_BACKEND=args.attention_backend,
                             INFERENCE_PRECISION_HINT="f32", DYNAMIC_QUANTIZATION_GROUP_SIZE=0,
@@ -110,16 +116,22 @@ def run(args, report):
         image_file = directory / "image.png"
         Image.fromarray(pixels).save(image_file)
 
-        def compare(messages, tokens, text, modality, with_image, with_audio=False, media_override=None, merge_frames=False):
+        image = [str(image_file)]
+        audio = [str(args.audio.resolve())] if args.audio else []
+
+        def generate(prompt, **kwargs):
+            """Greedy 20-token generation; returns (tokens, text)."""
+            stream = Tokens()
+            result = pipe.generate(prompt, max_new_tokens=20, do_sample=False, streamer=stream, **kwargs)
+            return stream.tokens, result.texts[0]
+
+        def compare(messages, tokens, text, modality, media=(), merge_frames=False):
             """Replay `tokens` through the oracle on the same history and score the agreement."""
             # GenAI expands image markers into embeddings. mtmd uses its own marker and adds
             # the same Gemma3 begin/end-image tokens around the reference encoder output.
             (directory / "prompt.txt").write_text(
                 tokenizer.apply_chat_template(messages, add_generation_prompt=True))
             (directory / "history.txt").write_text(" ".join(map(str, tokens)))
-            media = ([str(image_file)] if with_image else []) + ([str(args.audio.resolve())] if with_audio else [])
-            if media_override is not None:
-                media = media_override
             process = subprocess.run([str(args.oracle.resolve()), str((args.reference_language or args.language).resolve()),
                 str((args.reference_mmproj or args.mmproj).resolve()), ";".join(media) if media else "-",
                 str(directory / "prompt.txt"), str(directory / "history.txt")] + (["--merge-frames"] if merge_frames else []), capture_output=True, text=True)
@@ -133,17 +145,15 @@ def run(args, report):
                     "first_token_matches": reference[0] == tokens[0],
                     "matching_choice_fraction": sum(a == b for a, b in zip(reference, tokens)) / len(reference)}
             cases.append(case)
-            args.report.write_text(json.dumps(report, indent=2) + "\n")
+            save_report(args, report)
             print(json.dumps(case), flush=True)
             return case
 
-        for image in (False, True):
-            prompt = image_prompt if image else "What is 2 plus 2?"
-            stream = Tokens()
-            kwargs = {"images": [ov.Tensor(pixels[None])]} if image else {}
-            result = pipe.generate(prompt, max_new_tokens=20, do_sample=False, streamer=stream, **kwargs)
+        for with_image in (False, True):
+            prompt = image_prompt if with_image else "What is 2 plus 2?"
+            kwargs = {"images": [ov.Tensor(pixels[None])]} if with_image else {}
             compare([{"role": "user", "content": prompt.replace(image_marker, "<__media__>")}],
-                    stream.tokens, result.texts[0], "image" if image else "text", image)
+                    *generate(prompt, **kwargs), "image" if with_image else "text", image if with_image else ())
         if args.video_frames:
             assert args.family in ("qwen35", "gemma4"), "Add the family's reference video token assembly first"
             frames = np.stack([np.roll(pixels, i * 8, axis=1) for i in range(args.video_frames)])
@@ -163,12 +173,9 @@ def run(args, report):
             else:
                 marker = "<|video|>"
                 reference_prompt = " ".join(f"00:{i // 2:02d} <__media__>" for i in range(len(frames)))
-            stream = Tokens()
-            result = pipe.generate(marker + "\nDescribe the video.", videos=[ov.Tensor(frames)],
-                                   videos_metadata=[metadata], max_new_tokens=20, do_sample=False, streamer=stream)
             compare([{"role": "user", "content": reference_prompt + "\nDescribe the video."}],
-                    stream.tokens, result.texts[0], "video", False, media_override=files,
-                    merge_frames=args.family == "qwen35")
+                    *generate(marker + "\nDescribe the video.", videos=[ov.Tensor(frames)], videos_metadata=[metadata]),
+                    "video", files, merge_frames=args.family == "qwen35")
         if args.audio:
             import wave
             with wave.open(str(args.audio)) as audio_file:
@@ -180,22 +187,17 @@ def run(args, report):
                 kwargs = {"audios": [ov.Tensor(waveform)]}
                 if mixed:
                     kwargs["images"] = [ov.Tensor(pixels[None])]
-                stream = Tokens()
-                result = pipe.generate(prompt, max_new_tokens=20, do_sample=False, streamer=stream, **kwargs)
                 reference_prompt = prompt.replace(image_marker, "<__media__>").replace("<|audio|>", "<__media__>")
-                compare([{"role": "user", "content": reference_prompt}], stream.tokens,
-                        result.texts[0], "mixed" if mixed else "audio", mixed, True)
+                compare([{"role": "user", "content": reference_prompt}], *generate(prompt, **kwargs),
+                        "mixed" if mixed else "audio", (image if mixed else []) + audio)
         if args.multi_media:
             second_pixels = np.ascontiguousarray(pixels.transpose(1, 0, 2))
             second_file = directory / "image2.png"
             Image.fromarray(second_pixels).save(second_file)
             prompt = image_marker + "\n" + image_marker + "\nCompare these images."
-            stream = Tokens()
-            result = pipe.generate(prompt, images=[ov.Tensor(pixels[None]), ov.Tensor(second_pixels[None])],
-                                   max_new_tokens=20, do_sample=False, streamer=stream)
             compare([{"role": "user", "content": prompt.replace(image_marker, "<__media__>")}],
-                    stream.tokens, result.texts[0], "multi_image", False,
-                    media_override=[str(image_file), str(second_file)])
+                    *generate(prompt, images=[ov.Tensor(pixels[None]), ov.Tensor(second_pixels[None])]),
+                    "multi_image", image + [str(second_file)])
         if args.audio and (args.multi_media or args.audio_boundaries):
             def audio_file(samples, name):
                 file = directory / (name + ".wav")
@@ -214,43 +216,29 @@ def run(args, report):
                     extra_audios.append((f"audio_samples_{length}", [np.resize(waveform, length)]))
             for name, samples in extra_audios:
                 prompt = "<|audio|>\n" * len(samples) + "Transcribe the audio."
-                stream = Tokens()
-                result = pipe.generate(prompt, audios=[ov.Tensor(sample) for sample in samples],
-                                       max_new_tokens=20, do_sample=False, streamer=stream)
                 files = [audio_file(sample, f"{name}_{i}") for i, sample in enumerate(samples)]
                 compare([{"role": "user", "content": prompt.replace("<|audio|>", "<__media__>")}],
-                        stream.tokens, result.texts[0], name, False, media_override=files)
+                        *generate(prompt, audios=[ov.Tensor(sample) for sample in samples]), name, files)
         chat_reset_matches = True
         if args.chat:
             pipe.start_chat()
-            first = Tokens()
-            first_result = pipe.generate(image_prompt,
-                images=[ov.Tensor(pixels[None])], max_new_tokens=20, do_sample=False, streamer=first)
-            chat_reset_matches = first.tokens == cases[1]["tokens"]
-            report["chat_initial_tokens"] = first.tokens
-            followup = Tokens()
+            first_tokens, first_text = generate(image_prompt, images=[ov.Tensor(pixels[None])])
+            chat_reset_matches = first_tokens == cases[1]["tokens"]
+            report["chat_initial_tokens"] = first_tokens
             followup_prompt = "What is shown?"
-            followup_result = pipe.generate(followup_prompt, max_new_tokens=20,
-                                            do_sample=False, streamer=followup)
             compare([{"role": "user", "content": "<__media__>\nDescribe the image."},
-                     {"role": "assistant", "content": first_result.texts[0]},
+                     {"role": "assistant", "content": first_text},
                      {"role": "user", "content": followup_prompt}],
-                    followup.tokens, followup_result.texts[0], "image_chat", True)
+                    *generate(followup_prompt), "image_chat", image)
             pipe.finish_chat()
         if args.audio and args.chat:
             pipe.start_chat()
-            first = Tokens()
-            audio_prompt = "<|audio|>\nTranscribe the audio."
-            first_result = pipe.generate(audio_prompt, audios=[ov.Tensor(waveform)],
-                                         max_new_tokens=20, do_sample=False, streamer=first)
-            followup = Tokens()
+            _, first_text = generate("<|audio|>\nTranscribe the audio.", audios=[ov.Tensor(waveform)])
             followup_prompt = "What did the speaker say?"
-            followup_result = pipe.generate(followup_prompt, max_new_tokens=20,
-                                            do_sample=False, streamer=followup)
             compare([{"role": "user", "content": "<__media__>\nTranscribe the audio."},
-                     {"role": "assistant", "content": first_result.texts[0]},
+                     {"role": "assistant", "content": first_text},
                      {"role": "user", "content": followup_prompt}],
-                    followup.tokens, followup_result.texts[0], "audio_chat", False, True)
+                    *generate(followup_prompt), "audio_chat", audio)
             pipe.finish_chat()
         if args.api_checks:
             checks = report["api_checks"] = {}
@@ -263,37 +251,35 @@ def run(args, report):
                     checks[name] = {"passed": False, "error": traceback.format_exc()}
                 finally:
                     pipe.finish_chat()
-                args.report.write_text(json.dumps(report, indent=2) + "\n")
+                save_report(args, report)
                 print(name, checks[name], flush=True)
+
+            audio_media = audio
 
             def modern_chat(audio=False):
                 prompt = "<|audio|>\nTranscribe the audio." if audio else image_prompt
                 media = {"audios": [ov.Tensor(waveform)]} if audio else {"images": [ov.Tensor(pixels[None])]}
                 history = genai.ChatHistory([{"role": "user", "content": prompt}])
-                stream = Tokens()
-                result = pipe.generate(history, max_new_tokens=20, do_sample=False, streamer=stream, **media)
+                tokens, text = generate(history, **media)
                 reference_prompt = "<__media__>\nTranscribe the audio." if audio else "<__media__>\nDescribe the image."
                 reference_history = [{"role": "user", "content": reference_prompt}]
-                case = compare(reference_history, stream.tokens, result.texts[0],
-                               "modern_audio" if audio else "modern_image", not audio, audio)
-                first_case = case
+                reference_media = audio_media if audio else image
+                first_case = compare(reference_history, tokens, text, "modern_audio" if audio else "modern_image",
+                                     reference_media)
                 # Switch to a different history with identical media-token geometry.
                 # Token IDs alone cannot distinguish the two encoders' outputs.
                 other = genai.ChatHistory([{"role": "user", "content": prompt}])
                 other_media = ({"audios": [ov.Tensor(np.ascontiguousarray(waveform[::-1]))]} if audio else
                                {"images": [ov.Tensor((255 - pixels)[None])]})
                 pipe.generate(other, max_new_tokens=1, do_sample=False, **other_media)
-                history.append({"role": "assistant", "content": result.texts[0]})
-                reference_history.append({"role": "assistant", "content": result.texts[0]})
+                history.append({"role": "assistant", "content": text})
+                reference_history.append({"role": "assistant", "content": text})
                 followup = "What did the speaker say?" if audio else "What is shown?"
                 history.append({"role": "user", "content": followup})
                 reference_history.append({"role": "user", "content": followup})
-                stream = Tokens()
-                result = pipe.generate(history, max_new_tokens=20, do_sample=False, streamer=stream)
-                case = compare(reference_history, stream.tokens, result.texts[0],
-                               "modern_audio_chat" if audio else "modern_image_chat", not audio, audio)
-                assert all(c["first_token_matches"] and c["matching_choice_fraction"] >= .9
-                           for c in (first_case, case)), (first_case, case)
+                case = compare(reference_history, *generate(history),
+                               "modern_audio_chat" if audio else "modern_image_chat", reference_media)
+                assert case_passed(first_case) and case_passed(case), (first_case, case)
 
             def beam_search():
                 result = pipe.generate(image_prompt, images=[ov.Tensor(pixels[None])],
@@ -307,9 +293,8 @@ def run(args, report):
                         return genai.StreamingStatus.CANCEL if len(self.tokens) >= 3 else genai.StreamingStatus.RUNNING
                 pipe.generate(image_prompt, images=[ov.Tensor(pixels[None])], max_new_tokens=20, do_sample=False,
                               streamer=Cancel())
-                stream = Tokens()
-                pipe.generate("What is 2 plus 2?", max_new_tokens=20, do_sample=False, streamer=stream)
-                assert stream.tokens == cases[0]["tokens"], stream.tokens
+                tokens, _ = generate("What is 2 plus 2?")
+                assert tokens == cases[0]["tokens"], tokens
 
             if args.chat:
                 check("modern_image_chat", modern_chat)
@@ -319,9 +304,7 @@ def run(args, report):
             check("cancel_and_reset", cancel_and_reset)
 
         # A second request must start with an empty cache.
-        reset_stream = Tokens()
-        pipe.generate("What is 2 plus 2?", max_new_tokens=20, do_sample=False, streamer=reset_stream)
-        reset_matches = reset_stream.tokens == cases[0]["tokens"]
+        reset_matches = generate("What is 2 plus 2?")[0] == cases[0]["tokens"]
     report.update(request_reset_matches=reset_matches, chat_reset_matches=chat_reset_matches)
 
 

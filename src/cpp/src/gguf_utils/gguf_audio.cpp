@@ -60,12 +60,14 @@ public:
         m_encoder = utils::singleton_core().compile_model(model, device, config).create_infer_request();
         if (!m_unified) {
             const auto bins = std::stoull(model->get_rt_info<std::string>({"gguf_mmproj", "clip.audio.num_mel_bins"}));
-            m_width = std::stoull(model->get_rt_info<std::string>({"gguf_mmproj", "clip.audio.embedding_length"}));
+            const auto width =
+                std::stoull(model->get_rt_info<std::string>({"gguf_mmproj", "clip.audio.embedding_length"}));
             m_features = utils::singleton_core()
                              .compile_model(gemma4_spectrogram(bins),
                                             "CPU",
                                             {{ov::hint::inference_precision.name(), ov::element::f32}})
                              .create_infer_request();
+            m_encoder.set_tensor("position_embeddings", relative_positions(width));
         }
     }
 
@@ -75,49 +77,67 @@ public:
                         "Gemma4 audio requires nonempty mono f32 samples at 16000 Hz");
         const auto& shape = waveform.get_shape();
         OPENVINO_ASSERT(shape.size() == 1 || (shape.size() == 2 && shape[0] == 1), "Audio must be mono");
-        const auto* samples = waveform.data<const float>();
+        if (m_unified)
+            return {encode_waveform_frames(waveform.data<const float>(), waveform.get_size())};
+        // The encoder attends within 30 s chunks of the spectrogram.
         std::vector<ov::Tensor> outputs;
-        const auto chunk_size = m_unified ? waveform.get_size() : size_t(30 * 16000);
-        for (size_t off = 0; off < waveform.get_size(); off += chunk_size) {
-            const auto count = std::min(chunk_size, waveform.get_size() - off);
-            if (m_unified) {
-                const auto frames = (count + 639) / 640;
-                ov::Tensor input(ov::element::f32, {1, 1, frames, 640});
-                std::fill_n(input.data<float>(), input.get_size(), 0.f);
-                std::copy_n(samples + off, count, input.data<float>());
-                m_encoder.set_tensor("waveform_frames", input);
-            } else {
-                const int64_t frames = (int64_t(count) + 160 - 321) / 160 + 1;
-                OPENVINO_ASSERT(frames > 0, "Gemma4 audio chunk is too short to form a spectrogram frame");
-                const auto padded = std::max(size_t((frames - 1) * 160 + 512), count + 160);
-                ov::Tensor input(ov::element::f32, {padded});
-                std::fill_n(input.data<float>(), input.get_size(), 0.f);
-                std::copy_n(samples + off, count, input.data<float>() + 160);
-                m_features.set_input_tensor(input);
-                m_features.infer();
-                m_encoder.set_tensor("features", m_features.get_output_tensor());
-                set_positions((frames + 3) / 4);
-            }
-            m_encoder.infer();
-            const auto output = m_encoder.get_tensor("audio_features");
-            ov::Tensor owned(output.get_element_type(), output.get_shape());
-            output.copy_to(owned);
-            outputs.push_back(std::move(owned));
-        }
+        constexpr size_t chunk = 30 * 16000;
+        for (size_t offset = 0; offset < waveform.get_size(); offset += chunk)
+            outputs.push_back(encode_spectrogram(waveform.data<const float>() + offset,
+                                                 std::min(chunk, waveform.get_size() - offset)));
         return outputs;
     }
 
 private:
-    void set_positions(size_t count) {
-        ov::Tensor positions(ov::element::f32, {1, 1, 13, m_width});
-        const auto half = m_width / 2;
+    // Raw 16 kHz samples in zero-padded 640-sample frames.
+    ov::Tensor encode_waveform_frames(const float* samples, size_t count) {
+        ov::Tensor input(ov::element::f32, {1, 1, (count + 639) / 640, 640});
+        std::fill_n(input.data<float>(), input.get_size(), 0.f);
+        std::copy_n(samples, count, input.data<float>());
+        m_encoder.set_tensor("waveform_frames", input);
+        return infer();
+    }
+
+    ov::Tensor encode_spectrogram(const float* samples, size_t count) {
+        const int64_t frames = (int64_t(count) + 160 - 321) / 160 + 1;
+        OPENVINO_ASSERT(frames > 0, "Gemma4 audio chunk is too short to form a spectrogram frame");
+        const auto padded = std::max(size_t((frames - 1) * 160 + 512), count + 160);
+        ov::Tensor input(ov::element::f32, {padded});
+        std::fill_n(input.data<float>(), input.get_size(), 0.f);
+        std::copy_n(samples, count, input.data<float>() + 160);
+        m_features.set_input_tensor(input);
+        m_features.infer();
+        m_encoder.set_tensor("features", m_features.get_output_tensor());
+        set_attention((frames + 3) / 4);
+        return infer();
+    }
+
+    ov::Tensor infer() {
+        m_encoder.infer();
+        const auto output = m_encoder.get_tensor("audio_features");
+        ov::Tensor owned(output.get_element_type(), output.get_shape());
+        output.copy_to(owned);
+        return owned;
+    }
+
+    // Sinusoids for the 13 relative distances 12..0 of the causal attention horizon.
+    static ov::Tensor relative_positions(size_t width) {
+        ov::Tensor positions(ov::element::f32, {1, 1, 13, width});
+        const auto half = width / 2;
         for (size_t p = 0; p < 13; ++p)
             for (size_t i = 0; i < half; ++i) {
                 const float theta =
                     float(12 - p) * std::exp(-float(i) * (std::log(10000.f) / float(std::max(half - 1, size_t(1)))));
-                positions.data<float>()[p * m_width + i] = std::sin(theta);
-                positions.data<float>()[p * m_width + half + i] = std::cos(theta);
+                positions.data<float>()[p * width + i] = std::sin(theta);
+                positions.data<float>()[p * width + half + i] = std::cos(theta);
             }
+        return positions;
+    }
+
+    // Full chunks share one mask; only a shorter last chunk rebuilds it.
+    void set_attention(size_t count) {
+        if (count == m_attention_tokens)
+            return;
         ov::Tensor mask(ov::element::f32, {1, 1, count, count});
         ov::Tensor relative(ov::element::i32, mask.get_shape());
         for (size_t q = 0; q < count; ++q)
@@ -126,13 +146,13 @@ private:
                 mask.data<float>()[q * count + k] = distance >= 0 && distance < 12 ? 0.f : -1e9f;
                 relative.data<int32_t>()[q * count + k] = std::clamp(int64_t(12) - distance, int64_t(0), int64_t(12));
             }
-        m_encoder.set_tensor("position_embeddings", positions);
         m_encoder.set_tensor("attention_mask", mask);
         m_encoder.set_tensor("relative_indices", relative);
+        m_attention_tokens = count;
     }
 
     bool m_unified = false;
-    size_t m_width = 0;
+    size_t m_attention_tokens = 0;
     ov::InferRequest m_encoder, m_features;
     std::mutex m_mutex;
 };

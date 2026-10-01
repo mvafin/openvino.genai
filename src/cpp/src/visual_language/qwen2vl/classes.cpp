@@ -942,8 +942,7 @@ InputsEmbedderQwen2VL::InputsEmbedderQwen2VL(const VLMConfig& config,
                                              const VisionEncoder::Ptr& vision,
                                              const EmbeddingsModel::Ptr& embeddings,
                                              const std::string& device)
-    : IInputsEmbedder(config, tokenizer, vision, embeddings, device),
-      m_vision_is_projected(true) {
+    : IInputsEmbedder(config, tokenizer, vision, embeddings, device) {
     encode_vision_placeholder_tokens();
     const auto merge = vision->get_processor_config().merge_size;
     m_merge_length = merge * merge;
@@ -1345,7 +1344,8 @@ std::pair<ov::Tensor, ov::Tensor> InputsEmbedderQwen2VL::run_video_image_embeddi
     auto [reordered_image_embeds, reordered_images_grid_thw] = qwen2_vl_utils::reorder_image_embeds_and_grid_thw(images, images_sequence);
     auto [reordered_video_embeds, reordered_videos_grid_thw] = qwen2_vl_utils::reorder_video_embeds_and_grid_thw(videos, videos_sequence);
 
-    if (m_vision_is_projected) {
+    // Pre-merged encoders, such as GGUF projectors, have no merger model.
+    if (!m_ireq_queue_vision_embeddings_merger) {
         auto video = qwen2_vl_utils::concatenate_video_image_embeds(reordered_video_embeds, {});
         auto image = qwen2_vl_utils::concatenate_video_image_embeds({}, reordered_image_embeds);
         // The assembly path expects a rank-two tensor even for an absent modality.

@@ -57,8 +57,7 @@ InputsEmbedderGemma3::InputsEmbedderGemma3(const VLMConfig& config,
                                            const EmbeddingsModel::Ptr& embeddings,
                                            const std::string& device)
     : IInputsEmbedder(config, tokenizer, vision, embeddings, device),
-      m_image_tag_separator(""),
-      m_position_ids_offset(0) {
+      m_gguf_layout(true) {
     patch_chat_template();
 }
 
@@ -108,13 +107,15 @@ NormalizedPrompt InputsEmbedderGemma3::normalize_prompt(const std::string& promp
     for (size_t new_image_id : images_sequence) {
         const size_t num_image_tokens = images.at(new_image_id - base_id).resized_source.get_shape().at(1);
 
+        const std::string separator = m_gguf_layout ? "" : "\n\n";
         std::string expanded_tag;
-        expanded_tag.reserve(2 + start_of_image.size() + num_image_tokens * image_token.size() + end_of_image.size() + 2);
-        expanded_tag = m_image_tag_separator + start_of_image;
+        expanded_tag.reserve(2 * separator.size() + start_of_image.size() + num_image_tokens * image_token.size() +
+                             end_of_image.size());
+        expanded_tag = separator + start_of_image;
         for (size_t i = 0; i < num_image_tokens; i++) {
             expanded_tag += image_token;
         }
-        expanded_tag += end_of_image + m_image_tag_separator;
+        expanded_tag += end_of_image + separator;
 
         size_t pos = unified_prompt.find(start_of_image, search_offset);
         OPENVINO_ASSERT(pos != std::string::npos, "Failed to find image token in prompt during normalization");
@@ -196,13 +197,13 @@ const std::unordered_map<std::string, ov::Tensor>& InputsEmbedderGemma3::get_lm_
 std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderGemma3::get_position_ids(const size_t inputs_embeds_size, const size_t history_size) {
     // position_ids in Gemma3 are 1-indexed
     // https://github.com/huggingface/optimum-intel/blob/v1.24.0/optimum/intel/openvino/modeling_visual_language.py#L874-L876
-    return IInputsEmbedder::get_position_ids(inputs_embeds_size, history_size + m_position_ids_offset);
+    return IInputsEmbedder::get_position_ids(inputs_embeds_size, history_size + (m_gguf_layout ? 0 : 1));
 }
 
 std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderGemma3::get_generation_phase_position_ids(const size_t inputs_embeds_size, const size_t history_size, int64_t rope_delta) {
     // position_ids in Gemma3 are 1-indexed
     // https://github.com/huggingface/optimum-intel/blob/v1.24.0/optimum/intel/openvino/modeling_visual_language.py#L874-L876
-    return IInputsEmbedder::get_position_ids(inputs_embeds_size, history_size + m_position_ids_offset);
+    return IInputsEmbedder::get_position_ids(inputs_embeds_size, history_size + (m_gguf_layout ? 0 : 1));
 }
 
 } // namespace ov::genai

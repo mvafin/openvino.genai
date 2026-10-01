@@ -580,7 +580,8 @@ std::pair<ov::Tensor, ov::Tensor> InputsEmbedderQwen3VL::run_video_image_embeddi
     const std::vector<size_t>& images_sequence,
     const std::vector<EncodedVideo>& videos,
     const std::vector<size_t>& videos_sequence) {
-    if (m_vision_is_projected) {
+    // Pre-merged encoders, such as GGUF projectors, have no merger model.
+    if (!m_ireq_queue_vision_embeddings_merger) {
         return InputsEmbedderQwen2VL::run_video_image_embeddings_merger(images,
                                                                         images_sequence,
                                                                         videos,

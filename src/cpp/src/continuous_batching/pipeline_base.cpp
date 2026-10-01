@@ -384,9 +384,7 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
         {
             std::lock_guard<std::mutex> lock(m_embeddings_mutex);
             const auto audio_encoding_start = std::chrono::steady_clock::now();
-            m_inputs_embedder->encode_audios(
-                m_pending_audios_batches.empty() ? std::vector<ov::Tensor>{} : m_pending_audios_batches[0],
-                true);
+            m_inputs_embedder->encode_audios(pending_audios(0), true);
             PerfMetrics::emplace_duration(vlm_perf_metrics[0].vlm_raw_metrics.audio_encoding_durations, audio_encoding_start);
         }
 
@@ -445,8 +443,7 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
             {
                 std::lock_guard<std::mutex> lock(m_embeddings_mutex);
                 const auto audio_encoding_start = std::chrono::steady_clock::now();
-                m_inputs_embedder->encode_audios(i < m_pending_audios_batches.size() ? m_pending_audios_batches[i]
-                                                                                     : std::vector<ov::Tensor>{});
+                m_inputs_embedder->encode_audios(pending_audios(i));
                 PerfMetrics::emplace_duration(vlm_perf_metrics[i].vlm_raw_metrics.audio_encoding_durations, audio_encoding_start);
             }
 
@@ -659,11 +656,10 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
         VLMChatContext::ProcessedChatData processed_chat_data;
         {
             std::lock_guard<std::mutex> lock(m_embeddings_mutex);
-            processed_chat_data = chat_contexts[i].process(
-                images_vector[i],
-                videos_vector[i],
-                videos_metadata_vector[i],
-                i < m_pending_audios_batches.size() ? m_pending_audios_batches[i] : std::vector<ov::Tensor>{});
+            processed_chat_data = chat_contexts[i].process(images_vector[i],
+                                                           videos_vector[i],
+                                                           videos_metadata_vector[i],
+                                                           pending_audios(i));
         }
         vlm_perf_metrics[i].vlm_raw_metrics.audio_encoding_durations.emplace_back(
             processed_chat_data.audio_encoding_duration);

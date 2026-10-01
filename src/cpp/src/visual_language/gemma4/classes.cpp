@@ -400,9 +400,11 @@ void InputsEmbedderGemma4::encode_audios(const std::vector<ov::Tensor>& audios, 
     OPENVINO_ASSERT(audios.empty() || m_audio_encoder, "This GGUF pair has no audio encoder");
     if (audios.empty())
         return;
-    const auto encoded = m_tokenizer.encode("<|audio|>", add_special_tokens(false)).input_ids;
-    OPENVINO_ASSERT(encoded.get_size() == 1, "Gemma4 requires a single audio placeholder token");
-    m_audio_token_id = encoded.data<const int64_t>()[0];
+    if (m_audio_token_id < 0) {
+        const auto encoded = m_tokenizer.encode("<|audio|>", add_special_tokens(false)).input_ids;
+        OPENVINO_ASSERT(encoded.get_size() == 1, "Gemma4 requires a single audio placeholder token");
+        m_audio_token_id = encoded.data<const int64_t>()[0];
+    }
     for (const auto& audio : audios) {
         auto chunks = m_audio_encoder(audio);
         size_t count = 0;
@@ -590,34 +592,30 @@ void InputsEmbedderGemma4::expand_video_tags_in_prompt(std::string& unified_prom
 }
 
 ov::Tensor InputsEmbedderGemma4::get_per_layer_embeddings(const ov::Tensor& input_ids) {
-    if (!m_per_layer_embeddings_requests) {
-        // GGUF: per_layer_inputs come from the text embedding model; media uses the padding row.
-        ov::Tensor ids(input_ids.get_element_type(), input_ids.get_shape());
-        input_ids.copy_to(ids);
-        auto* data = ids.data<int64_t>();
-        for (size_t i = 0; i < ids.get_size(); ++i) {
-            if (data[i] == m_image_token_id || data[i] == m_video_token_id || data[i] == m_audio_token_id)
-                data[i] = 0;
-        }
-        CircularBufferQueueElementGuard<EmbeddingsRequest> guard(m_embedding->get_request_queue().get());
-        ov::InferRequest& req = guard.get().ireq;
+    const auto infer = [](ov::InferRequest& req, const ov::Tensor& ids, const ov::Output<const ov::Node>& output) {
         req.set_tensor("input_ids", ids);
         req.infer();
-        const ov::Tensor& output = req.get_tensor("per_layer_inputs");
-        ov::Tensor result(output.get_element_type(), output.get_shape());
-        output.copy_to(result);
+        const ov::Tensor& embeddings = req.get_tensor(output);
+        ov::Tensor result(embeddings.get_element_type(), embeddings.get_shape());
+        embeddings.copy_to(result);
         return result;
+    };
+    if (m_per_layer_embeddings_requests) {
+        CircularBufferQueueElementGuard<ov::InferRequest> guard(m_per_layer_embeddings_requests.get());
+        ov::InferRequest& req = guard.get();
+        return infer(req, input_ids, req.get_compiled_model().output());
     }
-
-    CircularBufferQueueElementGuard<ov::InferRequest> guard(m_per_layer_embeddings_requests.get());
-    ov::InferRequest& req = guard.get();
-    req.set_tensor("input_ids", input_ids);
-    req.infer();
-
-    const ov::Tensor& output = req.get_output_tensor();
-    ov::Tensor result(output.get_element_type(), output.get_shape());
-    output.copy_to(result);
-    return result;
+    // GGUF: per_layer_inputs come from the text embedding model; media uses the padding row.
+    ov::Tensor ids(input_ids.get_element_type(), input_ids.get_shape());
+    input_ids.copy_to(ids);
+    auto* data = ids.data<int64_t>();
+    for (size_t i = 0; i < ids.get_size(); ++i) {
+        if (data[i] == m_image_token_id || data[i] == m_video_token_id || data[i] == m_audio_token_id)
+            data[i] = 0;
+    }
+    CircularBufferQueueElementGuard<EmbeddingsRequest> guard(m_embedding->get_request_queue().get());
+    ov::InferRequest& req = guard.get().ireq;
+    return infer(req, ids, req.get_compiled_model().output("per_layer_inputs"));
 }
 
 ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(const std::string& prompt,

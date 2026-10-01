@@ -75,6 +75,11 @@ protected:
     // Empty when the no-audio overloads are used.
     std::vector<std::vector<ov::Tensor>> m_pending_audios_batches;
 
+    const std::vector<ov::Tensor>& pending_audios(size_t batch) const {
+        static const std::vector<ov::Tensor> none;
+        return batch < m_pending_audios_batches.size() ? m_pending_audios_batches[batch] : none;
+    }
+
     std::shared_ptr<VisionRegistry> m_vision_registry;
 
     void stream_tokens(const std::shared_ptr<ThreadedStreamerWrapper>& streamer_ptr, const GenerationHandle& handle);

@@ -141,7 +141,6 @@ protected:
     size_t m_merge_length;
 
     bool m_with_cu_seqlens_input = false;
-    bool m_vision_is_projected = false;
 
     virtual void expand_video_tags_in_prompt(
         std::string& unified_prompt,

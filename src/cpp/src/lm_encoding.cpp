@@ -1,14 +1,16 @@
 // Copyright (C) 2024-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
+#include "lm_encoding.hpp"
+
 #include <algorithm>
 #include <numeric>
+#include <optional>
 #include <vector>
 
-#include "utils.hpp"
-#include "lm_encoding.hpp"
 #include "openvino/genai/perf_metrics.hpp"
 #include "openvino/genai/streamer_base.hpp"
+#include "utils.hpp"
 
 namespace {
 
@@ -207,6 +209,8 @@ ov::genai::utils::GenerationFinishInfo get_lm_encoded_results(
 
     // "Generation" phase
 
+    // GGUF embedding models also return per_layer_inputs; resolved on the first decode step.
+    std::optional<bool> embedding_returns_per_layer;
     while (!active_sequence_groups.empty()) {
         size_t total_num_tokens = 0;
 
@@ -260,6 +264,8 @@ ov::genai::utils::GenerationFinishInfo get_lm_encoded_results(
             EmbeddingsRequest& req = embeddings_request_guard.get();
             const ov::Tensor& embed_prompt_tensor = m_embedding->infer(req, new_input_ids, use_intermediate_remote_tensor);
             m_llm.set_tensor("inputs_embeds", embed_prompt_tensor);
+            if (!embedding_returns_per_layer)
+                embedding_returns_per_layer = req.ireq.get_compiled_model().outputs().size() > 1;
 
             // Update extra inputs for LLM if any
             for (const auto& [name, tensor] : lm_extra_inputs) {
@@ -273,8 +279,8 @@ ov::genai::utils::GenerationFinishInfo get_lm_encoded_results(
                     ov::Tensor new_visual_pos_masks{tensor.get_element_type(), {batch_size, 1}};
                     std::fill_n(new_visual_pos_masks.data<bool>(), new_visual_pos_masks.get_size(), false);
                     m_llm.set_tensor(name, new_visual_pos_masks);
-                } else if (name == "per_layer_inputs" && req.ireq.get_compiled_model().outputs().size() > 1) {
-                    // GGUF embedding models also return per_layer_inputs; the callback would deadlock here.
+                } else if (name == "per_layer_inputs" && *embedding_returns_per_layer) {
+                    // Take them from this request; the callback would deadlock on the held embedding request.
                     const ov::Tensor& per_layer = req.ireq.get_tensor(name);
                     ov::Tensor per_layer_inputs(per_layer.get_element_type(), per_layer.get_shape());
                     per_layer.copy_to(per_layer_inputs);
