@@ -12,7 +12,7 @@ namespace ov::genai {
 class VisionEncoder;
 class InputsEmbedder;
 struct GGUFMultimodalModels {
-    std::shared_ptr<ov::Model> language, text_embeddings, vision, audio;
+    std::shared_ptr<ov::Model> language, text_embeddings, per_layer_embeddings, vision, audio;
     Tokenizer tokenizer;
     VLMConfig config;
     ProcessorConfig processor;

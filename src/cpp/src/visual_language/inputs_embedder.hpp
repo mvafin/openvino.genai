@@ -35,11 +35,14 @@ struct NormalizedPrompt {
 
 class InputsEmbedder {
 public:
+    // In-memory models, e.g. from GGUF. Gemma4 E2B/E4B also take their per-layer token lookup.
     InputsEmbedder(const VLMConfig& config,
                    const Tokenizer& tokenizer,
                    const VisionEncoder::Ptr& vision,
                    const EmbeddingsModel::Ptr& embeddings,
-                   const std::string& device);
+                   const std::string& device,
+                   const std::shared_ptr<ov::Model>& per_layer_embeddings = nullptr,
+                   const ov::AnyMap& properties = {});
 
     InputsEmbedder(const std::filesystem::path& model_dir,
                    const Tokenizer& tokenizer,

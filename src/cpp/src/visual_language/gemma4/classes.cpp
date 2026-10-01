@@ -310,13 +310,31 @@ EncodedVideo VisionEncoderGemma4::encode_frames(const std::vector<ov::Tensor>& f
     return result;
 }
 
+void InputsEmbedderGemma4::create_per_layer_embeddings_requests(ov::CompiledModel compiled) {
+    ov::genai::utils::print_compiled_model_properties(compiled, "VLM per-layer text embeddings model");
+    m_per_layer_embeddings_requests = std::make_unique<CircularBufferQueue<ov::InferRequest>>(
+        compiled.get_property(ov::optimal_number_of_infer_requests),
+        [&compiled]() -> ov::InferRequest {
+            return compiled.create_infer_request();
+        });
+}
+
 InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& config,
                                            const Tokenizer& tokenizer,
                                            const VisionEncoder::Ptr& vision,
                                            const EmbeddingsModel::Ptr& embeddings,
-                                           const std::string& device)
-    : IInputsEmbedder(config, tokenizer, vision, embeddings, device) {
+                                           const std::string& device,
+                                           const std::shared_ptr<ov::Model>& per_layer_embeddings,
+                                           const ov::AnyMap& properties)
+    : IInputsEmbedder(config, tokenizer, vision, embeddings, device),
+      m_pad_media_per_layer_inputs(true) {
     patch_chat_template();
+    if (per_layer_embeddings) {
+        create_per_layer_embeddings_requests(utils::singleton_core().compile_model(
+            per_layer_embeddings,
+            device,
+            utils::get_model_properties(properties, "text_embeddings_per_layer", device)));
+    }
 }
 
 InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& vlm_config,
@@ -337,12 +355,7 @@ InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& vlm_config,
         per_layer_model_path,
         device,
         utils::get_model_properties(device_config, "text_embeddings_per_layer", device));
-    ov::genai::utils::print_compiled_model_properties(compiled, "VLM per-layer text embeddings model");
-    m_per_layer_embeddings_requests = std::make_unique<CircularBufferQueue<ov::InferRequest>>(
-        compiled.get_property(ov::optimal_number_of_infer_requests),
-        [&compiled]() -> ov::InferRequest {
-            return compiled.create_infer_request();
-        });
+    create_per_layer_embeddings_requests(compiled);
 }
 
 InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& vlm_config,
@@ -368,12 +381,7 @@ InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& vlm_config,
         weights,
         device,
         utils::get_model_properties(device_config, "text_embeddings_per_layer", device));
-    ov::genai::utils::print_compiled_model_properties(compiled, "VLM per-layer text embeddings model");
-    m_per_layer_embeddings_requests = std::make_unique<CircularBufferQueue<ov::InferRequest>>(
-        compiled.get_property(ov::optimal_number_of_infer_requests),
-        [&compiled]() -> ov::InferRequest {
-            return compiled.create_infer_request();
-        });
+    create_per_layer_embeddings_requests(compiled);
 }
 
 void InputsEmbedderGemma4::finish_chat() {
@@ -592,30 +600,26 @@ void InputsEmbedderGemma4::expand_video_tags_in_prompt(std::string& unified_prom
 }
 
 ov::Tensor InputsEmbedderGemma4::get_per_layer_embeddings(const ov::Tensor& input_ids) {
-    const auto infer = [](ov::InferRequest& req, const ov::Tensor& ids, const ov::Output<const ov::Node>& output) {
-        req.set_tensor("input_ids", ids);
-        req.infer();
-        const ov::Tensor& embeddings = req.get_tensor(output);
-        ov::Tensor result(embeddings.get_element_type(), embeddings.get_shape());
-        embeddings.copy_to(result);
-        return result;
-    };
-    if (m_per_layer_embeddings_requests) {
-        CircularBufferQueueElementGuard<ov::InferRequest> guard(m_per_layer_embeddings_requests.get());
-        ov::InferRequest& req = guard.get();
-        return infer(req, input_ids, req.get_compiled_model().output());
+    OPENVINO_ASSERT(m_per_layer_embeddings_requests, "Per-layer text embeddings model is not available");
+    ov::Tensor ids = input_ids;
+    if (m_pad_media_per_layer_inputs) {
+        ids = ov::Tensor(input_ids.get_element_type(), input_ids.get_shape());
+        input_ids.copy_to(ids);
+        auto* data = ids.data<int64_t>();
+        for (size_t i = 0; i < ids.get_size(); ++i) {
+            if (data[i] == m_image_token_id || data[i] == m_video_token_id || data[i] == m_audio_token_id)
+                data[i] = 0;
+        }
     }
-    // GGUF: per_layer_inputs come from the text embedding model; media uses the padding row.
-    ov::Tensor ids(input_ids.get_element_type(), input_ids.get_shape());
-    input_ids.copy_to(ids);
-    auto* data = ids.data<int64_t>();
-    for (size_t i = 0; i < ids.get_size(); ++i) {
-        if (data[i] == m_image_token_id || data[i] == m_video_token_id || data[i] == m_audio_token_id)
-            data[i] = 0;
-    }
-    CircularBufferQueueElementGuard<EmbeddingsRequest> guard(m_embedding->get_request_queue().get());
-    ov::InferRequest& req = guard.get().ireq;
-    return infer(req, ids, req.get_compiled_model().output("per_layer_inputs"));
+    CircularBufferQueueElementGuard<ov::InferRequest> guard(m_per_layer_embeddings_requests.get());
+    ov::InferRequest& req = guard.get();
+    req.set_tensor("input_ids", ids);
+    req.infer();
+
+    const ov::Tensor& output = req.get_output_tensor();
+    ov::Tensor result(output.get_element_type(), output.get_shape());
+    output.copy_to(result);
+    return result;
 }
 
 ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(const std::string& prompt,

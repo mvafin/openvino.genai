@@ -177,9 +177,9 @@ TEST(GGUFMultimodal, GemmaAudioHistoryAndResetPreserveFeaturePlacement) {
     EXPECT_EQ(count_features("ab", 11.f), 0);
 }
 
-// GGUF Gemma4 text embedding models also return per_layer_inputs. Media placeholders take the
-// padding row, as in llama.cpp's embedding-input branch and optimum-intel's per-layer export.
-TEST(GGUFMultimodal, GemmaPerLayerInputsComeFromTextEmbeddingModel) {
+// GGUF Gemma4 per-layer token lookups run as their own model. Media placeholders take the
+// padding row, as in llama.cpp's embedding-input branch.
+TEST(GGUFMultimodal, GemmaPerLayerInputsPadMediaTokens) {
     using namespace ov::genai;
     Tokenizer tokenizer(sentencepiece_config());
     constexpr size_t layers = 2, width = 3;
@@ -194,19 +194,21 @@ TEST(GGUFMultimodal, GemmaPerLayerInputsComeFromTextEmbeddingModel) {
     for (size_t i = 0; i < rows.size(); ++i)
         rows[i] = float(i / (layers * width));
     auto per_layer_table = ov::op::v0::Constant::create(ov::element::f32, {vocab_size, layers * width}, rows);
+    auto per_layer_ids = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{1, -1});
+    per_layer_ids->output(0).set_names({"input_ids"});
     auto per_layer = std::make_shared<ov::op::v1::Reshape>(
-        std::make_shared<ov::op::v8::Gather>(per_layer_table, ids, axis),
+        std::make_shared<ov::op::v8::Gather>(per_layer_table, per_layer_ids, axis),
         ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 0, layers, width}),
         true);
     per_layer->output(0).set_names({"per_layer_inputs"});
-    auto embedding_model =
-        std::make_shared<ov::Model>(ov::OutputVector{lookup, per_layer}, ov::ParameterVector{ids});
+    auto embedding_model = std::make_shared<ov::Model>(ov::OutputVector{lookup}, ov::ParameterVector{ids});
+    auto per_layer_model = std::make_shared<ov::Model>(ov::OutputVector{per_layer}, ov::ParameterVector{per_layer_ids});
     auto embeddings = std::make_shared<EmbeddingsModel>(embedding_model, "CPU", ov::AnyMap{});
     VLMConfig config;
     config.hidden_size = 4;
     config.hidden_size_per_layer_input = width;
     config.video_token = "<|video|>";
-    InputsEmbedderGemma4 embedder(config, tokenizer, nullptr, embeddings, "CPU");
+    InputsEmbedderGemma4 embedder(config, tokenizer, nullptr, embeddings, "CPU", per_layer_model);
     embedder.set_apply_chat_template_status(false);
     embedder.set_audio_encoder([](const ov::Tensor&) {
         return std::vector<ov::Tensor>{ov::Tensor(ov::element::f32, {1, 2, 4})};
@@ -229,7 +231,7 @@ TEST(GGUFMultimodal, GemmaPerLayerInputsComeFromTextEmbeddingModel) {
             EXPECT_EQ(per_layer_inputs.data<const float>()[t * layers * width + i], expected);
     }
     EXPECT_EQ(media, 2);
-    // Generated tokens use the same model through the continuous-batching callback.
+    // Generated tokens use the same lookup through the continuous-batching callback.
     ov::Tensor generated(ov::element::i64, {1, 1});
     generated.data<int64_t>()[0] = 9;
     const auto decoded = embedder.get_per_layer_embeddings_callback()(generated);

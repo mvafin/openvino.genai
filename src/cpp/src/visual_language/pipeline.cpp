@@ -37,7 +37,13 @@ std::shared_ptr<InputsEmbedder> create_gguf_inputs_embedder(const GGUFMultimodal
                                                             const ov::AnyMap& properties) {
     auto vision = create_gguf_vision_encoder(models, device, properties);
     auto embeddings = std::make_shared<EmbeddingsModel>(models.text_embeddings, device, properties);
-    auto embedder = std::make_shared<InputsEmbedder>(models.config, models.tokenizer, vision, embeddings, device);
+    auto embedder = std::make_shared<InputsEmbedder>(models.config,
+                                                     models.tokenizer,
+                                                     vision,
+                                                     embeddings,
+                                                     device,
+                                                     models.per_layer_embeddings,
+                                                     properties);
     attach_gguf_audio_encoder(*embedder, models, device, properties);
     return embedder;
 }

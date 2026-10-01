@@ -100,14 +100,22 @@ InputsEmbedder::InputsEmbedder(const VLMConfig& config,
                                const Tokenizer& tokenizer,
                                const VisionEncoder::Ptr& vision,
                                const EmbeddingsModel::Ptr& embeddings,
-                               const std::string& device) {
+                               const std::string& device,
+                               const std::shared_ptr<ov::Model>& per_layer_embeddings,
+                               const ov::AnyMap& properties) {
     switch (config.model_type) {
     case VLMModelType::GEMMA3:
         m_impl = std::make_shared<InputsEmbedderGemma3>(config, tokenizer, vision, embeddings, device);
         break;
     case VLMModelType::GEMMA4:
     case VLMModelType::GEMMA4_UNIFIED:
-        m_impl = std::make_shared<InputsEmbedderGemma4>(config, tokenizer, vision, embeddings, device);
+        m_impl = std::make_shared<InputsEmbedderGemma4>(config,
+                                                        tokenizer,
+                                                        vision,
+                                                        embeddings,
+                                                        device,
+                                                        per_layer_embeddings,
+                                                        properties);
         break;
     case VLMModelType::MUSE_GLIMMER:
         m_impl = std::make_shared<InputsEmbedderMuseGlimmer>(config, tokenizer, vision, embeddings, device);
