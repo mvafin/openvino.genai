@@ -11,8 +11,6 @@
 #include "gguf_tokenizer.hpp"
 #include "openvino/frontend/gguf/adapt_mmproj_to_genai.hpp"
 #include "openvino/frontend/gguf/adapt_to_genai.hpp"
-#include "openvino/op/constant.hpp"
-#include "openvino/op/multiply.hpp"
 
 namespace ov::genai {
 GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
@@ -99,22 +97,6 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
                 *entry.second = integer(entry.first);
         }
         return result;
-    }
-    // Gemma scales token lookups, while llama.cpp's embedding-input route leaves
-    // media features unchanged. Compensate for the scaling retained in the decoder.
-    for (const auto& model : {result.vision, result.audio}) {
-        if (!model)
-            continue;
-        auto output = model->get_results().front();
-        auto features = output->input_value(0);
-        OPENVINO_ASSERT(features.get_partial_shape()[2] == width,
-                        "GGUF language and media embedding widths do not match");
-        auto unscaled = std::make_shared<ov::op::v1::Multiply>(
-            features,
-            ov::op::v0::Constant::create(ov::element::f32, {}, {1.f / std::sqrt(float(width.get_length()))}));
-        unscaled->output(0).set_names(features.get_names());
-        output->input(0).replace_source_output(unscaled);
-        model->validate_nodes_and_infer_types();
     }
     if (gemma4) {
         result.config.model_type = projector == "gemma4uv" ? VLMModelType::GEMMA4_UNIFIED : VLMModelType::GEMMA4;
