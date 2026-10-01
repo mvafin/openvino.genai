@@ -51,15 +51,7 @@ std::shared_ptr<InputsEmbedder> create_gguf_inputs_embedder(const GGUFMultimodal
 GenerationConfig gguf_generation_config(GGUFMultimodalModels& models) {
     GenerationConfig config;
     config.set_eos_token_id(models.tokenizer.get_eos_token_id());
-    // Gemma's end-of-turn marker can differ from the GGUF tokenizer's EOS token.
-    const bool gemma3 = models.config.model_type == VLMModelType::GEMMA3;
-    if (gemma3 || models.config.model_type == VLMModelType::GEMMA4 ||
-        models.config.model_type == VLMModelType::GEMMA4_UNIFIED) {
-        const auto end_of_turn =
-            models.tokenizer.encode(gemma3 ? "<end_of_turn>" : "<turn|>", add_special_tokens(false));
-        OPENVINO_ASSERT(end_of_turn.input_ids.get_size() == 1, "GGUF Gemma requires a single end-of-turn token");
-        config.stop_token_ids.insert(end_of_turn.input_ids.data<const int64_t>()[0]);
-    }
+    config.stop_token_ids.insert(models.stop_token_ids.begin(), models.stop_token_ids.end());
     return config;
 }
 #endif

@@ -311,15 +311,18 @@ ov::genai::LLMPipeline::LLMPipeline(
     // tokenizer from what was already read instead of re-opening the .gguf. Exceptions: the
     // legacy reader's model has no such rt_info, and enable_save_ov_model needs the source
     // directory to write the tokenizer/detokenizer IRs to, which the metadata alone can't give.
-    const bool tokenizer_from_model = is_gguf_model(models_path) && !gguf_properties.enable_save_ov_model &&
-                                      !gguf_properties.use_legacy_reader();
+    const bool gguf_frontend = is_gguf_model(models_path) && !gguf_properties.use_legacy_reader();
+    const bool tokenizer_from_model = gguf_frontend && !gguf_properties.enable_save_ov_model;
+    const auto gguf_stop_tokens =
+        gguf_frontend ? gguf_stop_token_ids(gguf_tokenizer_metadata_from_model(model)) : std::set<int64_t>{};
     const Tokenizer tokenizer =
         tokenizer_from_model ? Tokenizer(GGUFTokenizerParameters(take_gguf_tokenizer_metadata(model)), properties)
                              : Tokenizer(models_path, properties);
     // On the from-file path the frontend's metadata is still on the model and no longer read.
     erase_gguf_tokenizer_metadata(model);
 
-    const auto generation_config = utils::from_config_json_if_exists(models_path);
+    auto generation_config = utils::from_config_json_if_exists(models_path);
+    generation_config.stop_token_ids.insert(gguf_stop_tokens.begin(), gguf_stop_tokens.end());
     if (should_use_stateful_pipeline(is_npu_requested, has_draft_model, attention_backend, model, properties)) {
         m_pimpl = StatefulPipeline::create(model, tokenizer, device, properties, generation_config, models_path);
     } else if (utils::explicitly_requires_paged_attention(user_properties)) {

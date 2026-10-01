@@ -19,7 +19,9 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     namespace gguf = ov::frontend::gguf;
     GGUFMultimodalModels result;
     result.language = convert_gguf_with_frontend(language.string());
-    result.tokenizer = Tokenizer(GGUFTokenizerParameters(take_gguf_tokenizer_metadata(result.language)), properties);
+    auto tokenizer_metadata = take_gguf_tokenizer_metadata(result.language);
+    result.stop_token_ids = gguf_stop_token_ids(tokenizer_metadata);
+    result.tokenizer = Tokenizer(GGUFTokenizerParameters(std::move(tokenizer_metadata)), properties);
     auto combined = convert_gguf_with_frontend(mmproj.string());
     const auto architecture = result.language->get_rt_info<std::string>("gguf_architecture");
     const auto projector = combined->get_rt_info<std::string>({"gguf_mmproj", "vision.projector"});
