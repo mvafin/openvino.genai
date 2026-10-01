@@ -1051,6 +1051,7 @@ VLMPipeline::VLMPipeline(
                                                device,
                                                std::move(properties),
                                                utils::explicitly_requires_paged_attention(user_properties));
+        utils::log_attention_backend(m_pimpl->get_attention_backend());
         m_pimpl->set_load_time(
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time)
                 .count());
