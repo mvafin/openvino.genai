@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <mutex>
 
 #include "gguf_multimodal.hpp"
@@ -60,14 +59,11 @@ public:
         m_encoder = utils::singleton_core().compile_model(model, device, config).create_infer_request();
         if (!m_unified) {
             const auto bins = std::stoull(model->get_rt_info<std::string>({"gguf_mmproj", "clip.audio.num_mel_bins"}));
-            const auto width =
-                std::stoull(model->get_rt_info<std::string>({"gguf_mmproj", "clip.audio.embedding_length"}));
             m_features = utils::singleton_core()
                              .compile_model(gemma4_spectrogram(bins),
                                             "CPU",
                                             {{ov::hint::inference_precision.name(), ov::element::f32}})
                              .create_infer_request();
-            m_encoder.set_tensor("position_embeddings", relative_positions(width));
         }
     }
 
@@ -108,7 +104,6 @@ private:
         m_features.set_input_tensor(input);
         m_features.infer();
         m_encoder.set_tensor("features", m_features.get_output_tensor());
-        set_attention((frames + 3) / 4);
         return infer();
     }
 
@@ -120,39 +115,7 @@ private:
         return owned;
     }
 
-    // Sinusoids for the 13 relative distances 12..0 of the causal attention horizon.
-    static ov::Tensor relative_positions(size_t width) {
-        ov::Tensor positions(ov::element::f32, {1, 1, 13, width});
-        const auto half = width / 2;
-        for (size_t p = 0; p < 13; ++p)
-            for (size_t i = 0; i < half; ++i) {
-                const float theta =
-                    float(12 - p) * std::exp(-float(i) * (std::log(10000.f) / float(std::max(half - 1, size_t(1)))));
-                positions.data<float>()[p * width + i] = std::sin(theta);
-                positions.data<float>()[p * width + half + i] = std::cos(theta);
-            }
-        return positions;
-    }
-
-    // Full chunks share one mask; only a shorter last chunk rebuilds it.
-    void set_attention(size_t count) {
-        if (count == m_attention_tokens)
-            return;
-        ov::Tensor mask(ov::element::f32, {1, 1, count, count});
-        ov::Tensor relative(ov::element::i32, mask.get_shape());
-        for (size_t q = 0; q < count; ++q)
-            for (size_t k = 0; k < count; ++k) {
-                const auto distance = int64_t(q) - int64_t(k);
-                mask.data<float>()[q * count + k] = distance >= 0 && distance < 12 ? 0.f : -1e9f;
-                relative.data<int32_t>()[q * count + k] = std::clamp(int64_t(12) - distance, int64_t(0), int64_t(12));
-            }
-        m_encoder.set_tensor("attention_mask", mask);
-        m_encoder.set_tensor("relative_indices", relative);
-        m_attention_tokens = count;
-    }
-
     bool m_unified = false;
-    size_t m_attention_tokens = 0;
     ov::InferRequest m_encoder, m_features;
     std::mutex m_mutex;
 };
