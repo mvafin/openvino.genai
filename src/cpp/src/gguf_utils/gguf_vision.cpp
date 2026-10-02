@@ -192,37 +192,35 @@ protected:
                     std::copy_n(flat + ((i * 3 + c) * patch + y) * patch,
                                 patch,
                                 image + c * n * patch * patch + (i / gw * patch + y) * gw * patch + i % gw * patch);
-        // Window-major patch order; each window attends only to itself.
-        std::vector<int32_t> order, inverse(n), xs(n), ys(n);
-        std::vector<size_t> window_sizes;
+        // Window-major patch order with every window padded to m_window^2 slots. Padding repeats
+        // the window's first patch and is masked out as a key.
+        const size_t slots = m_window * m_window;
+        std::vector<int32_t> order, inverse(n), xs, ys;
+        std::vector<float> key_mask;
         for (size_t wy = 0; wy < gh; wy += m_window)
             for (size_t wx = 0; wx < gw; wx += m_window) {
-                const size_t before = order.size();
+                const size_t first = order.size();
                 for (size_t y = wy; y < std::min(wy + m_window, gh); ++y)
-                    for (size_t x = wx; x < std::min(wx + m_window, gw); ++x)
+                    for (size_t x = wx; x < std::min(wx + m_window, gw); ++x) {
+                        inverse[y * gw + x] = int32_t(order.size());
                         order.push_back(int32_t(y * gw + x));
-                window_sizes.push_back(order.size() - before);
+                    }
+                key_mask.resize(first + slots, -std::numeric_limits<float>::infinity());
+                std::fill(key_mask.begin() + first, key_mask.begin() + order.size(), 0.f);
+                order.resize(first + slots, order[first]);
             }
-        for (size_t i = 0; i < n; ++i) {
-            inverse[order[i]] = int32_t(i);
-            xs[i] = order[i] % int32_t(gw) + 1;
-            ys[i] = order[i] / int32_t(gw) + 1;
+        for (const auto index : order) {
+            xs.push_back(index % int32_t(gw) + 1);
+            ys.push_back(index / int32_t(gw) + 1);
         }
-        ov::Tensor mask(ov::element::f32, {1, 1, n, n});
-        auto* additive = mask.data<float>();
-        std::fill_n(additive, n * n, -std::numeric_limits<float>::infinity());
-        size_t start = 0;
-        for (size_t size : window_sizes) {
-            for (size_t q = start; q < start + size; ++q)
-                std::fill_n(additive + q * n + start, size, 0.f);
-            start += size;
-        }
+        ov::Tensor mask(ov::element::f32, {order.size() / slots, 1, 1, slots});
+        std::copy(key_mask.begin(), key_mask.end(), mask.data<float>());
         encoder.set_tensor("patch_indices", index_tensor(order));
         encoder.set_tensor("output_indices", index_tensor(inverse));
         encoder.set_tensor("position_x", index_tensor(xs));
         encoder.set_tensor("position_y", index_tensor(ys));
         encoder.set_tensor("merge_indices", index_tensor(merge_order(gh, gw, config.merge_size)));
-        encoder.set_tensor("attention_mask", mask);
+        encoder.set_tensor("window_mask", mask);
         encoder.set_tensor("pixel_values", pixels);
     }
 
