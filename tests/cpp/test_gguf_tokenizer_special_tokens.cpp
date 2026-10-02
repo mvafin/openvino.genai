@@ -13,6 +13,7 @@
 #include "openvino/op/reshape.hpp"
 #include "visual_language/gemma4/classes.hpp"
 #include "visual_language/vlm_chat_context.hpp"
+#include "visual_language/vlm_utils.hpp"
 
 namespace {
 ov::genai::GGUFTokenizerParameters sentencepiece_config() {
@@ -138,7 +139,7 @@ TEST(GGUFMultimodal, PreformattedChatDoesNotDuplicateSpecialTokens) {
     EXPECT_EQ(encode("a"), expected);
 }
 
-TEST(GGUFMultimodal, GemmaAudioHistoryAndResetPreserveFeaturePlacement) {
+TEST(GGUFMultimodal, GemmaAudioPlacementFollowsTheAudioSequence) {
     using namespace ov::genai;
     Tokenizer tokenizer(sentencepiece_config());
     auto embeddings = constant_embeddings();
@@ -148,33 +149,42 @@ TEST(GGUFMultimodal, GemmaAudioHistoryAndResetPreserveFeaturePlacement) {
     InputsEmbedderGemma4 embedder(config, tokenizer, nullptr, embeddings, "CPU");
     embedder.set_apply_chat_template_status(false);
     embedder.set_audio_encoder(first_sample_audio_features);
-    const auto encode = [&](float value, bool chat) {
+    const auto sample = [](float value) {
         ov::Tensor audio(ov::element::f32, {1});
         audio.data<float>()[0] = value;
-        embedder.encode_audios({audio}, chat);
-        return embedder.normalize_prompt("a<|audio|>b", 0, {}).unified_prompt;
+        return audio;
     };
-    const auto count_features = [&](const std::string& prompt, float value) {
+    const auto encoded = embedder.encode_audios({sample(7.f), ov::Tensor(ov::element::f32, {0}), sample(9.f)});
+    ASSERT_EQ(encoded.size(), 3);
+    EXPECT_EQ(encoded[0].num_audio_tokens, 2);
+    EXPECT_EQ(encoded[0].audio_features.get_shape(), (ov::Shape{2, 4}));
+    EXPECT_EQ(encoded[1].num_audio_tokens, 0);
+    // The first value of each feature run, in prompt order.
+    const auto placed = [&](const NormalizedPrompt& prompt, size_t base) {
+        auto sequence = prompt.audios_sequence;
+        vlm_utils::rebase_media_sequence(sequence, base);
         VLMPerfMetrics metrics;
-        const auto features = embedder.get_inputs_embeds(prompt, {}, metrics);
-        return std::count(features.data<const float>(), features.data<const float>() + features.get_size(), value);
+        const auto features =
+            embedder.get_inputs_embeds(prompt.unified_prompt, {}, {}, encoded, metrics, true, {}, {}, sequence, {});
+        std::vector<float> runs;
+        const auto* data = features.data<const float>();
+        for (size_t i = 0; i < features.get_size(); i += 4)
+            if (data[i] != 0.25f && (runs.empty() || runs.back() != data[i]))
+                runs.push_back(data[i]);
+        return runs;
     };
-    const auto first = encode(7.f, true);
-    const auto second = encode(9.f, true);
-    EXPECT_EQ(count_features(first + second, 7.f), 8);
-    EXPECT_EQ(count_features(first + second, 9.f), 8);
-    embedder.encode_audios({}, true);
-    EXPECT_EQ(embedder.normalize_prompt("ab", 0, {}).unified_prompt, "ab");
-    EXPECT_EQ(count_features(first + second + "ab", 7.f), 8);
-    encode(13.f, true);
-    embedder.update_chat_history("", GenerationStatus::CANCEL);
-    EXPECT_EQ(count_features(first + second, 9.f), 8);
-    EXPECT_EQ(count_features(first + second, 13.f), 0);
-    embedder.finish_chat();
-    const auto independent = encode(11.f, false);
-    EXPECT_EQ(count_features(independent, 11.f), 8);
-    embedder.encode_audios({}, false);
-    EXPECT_EQ(count_features("ab", 11.f), 0);
+    const auto native = embedder.normalize_prompt("a<|audio|>b<|audio|><|audio|>", 0, 0, 0, {}, {}, encoded);
+    EXPECT_EQ(native.audios_sequence, (std::vector<size_t>{0, 1, 2}));
+    EXPECT_EQ(native.unified_prompt, "a<|audio><|audio|><|audio|><audio|>b<|audio><audio|><|audio><|audio|><|audio|><audio|>");
+    EXPECT_EQ(placed(native, 0), (std::vector<float>{7.f, 9.f}));
+    // A later chat turn with history audios 0-1: reversed universal tags bind by index.
+    const auto universal = embedder.normalize_prompt("<ov_genai_audio_4>x<ov_genai_audio_2>", 0, 0, 2, {}, {}, encoded);
+    EXPECT_EQ(universal.audios_sequence, (std::vector<size_t>{4, 2}));
+    EXPECT_EQ(placed(universal, 2), (std::vector<float>{9.f, 7.f}));
+    // Audio-free prompts are untouched, and a tag without its audio is rejected.
+    EXPECT_EQ(embedder.normalize_prompt("ab", 0, 0, 0, {}, {}, {}).unified_prompt, "ab");
+    EXPECT_ANY_THROW(embedder.normalize_prompt("<ov_genai_audio_0>", 0, 0, 0, {}, {}, {}));
+    EXPECT_TRUE(embedder.encode_audios({}).empty());
 }
 
 // GGUF Gemma4 per-layer token lookups run as their own model. Media placeholders take the
@@ -213,10 +223,12 @@ TEST(GGUFMultimodal, GemmaPerLayerInputsPadMediaTokens) {
     embedder.set_audio_encoder([](const ov::Tensor&) {
         return std::vector<ov::Tensor>{ov::Tensor(ov::element::f32, {1, 2, 4})};
     });
-    embedder.encode_audios({ov::Tensor(ov::element::f32, {1})}, false);
-    const auto prompt = embedder.normalize_prompt("a<|audio|>b", 0, {}).unified_prompt;
+    const auto audios = embedder.encode_audios({ov::Tensor(ov::element::f32, {1})});
+    const auto normalized = embedder.normalize_prompt("a<|audio|>b", 0, 0, 0, {}, {}, audios);
+    const auto& prompt = normalized.unified_prompt;
     VLMPerfMetrics metrics;
-    const auto inputs_embeds = embedder.get_inputs_embeds(prompt, {}, metrics);
+    const auto inputs_embeds =
+        embedder.get_inputs_embeds(prompt, {}, {}, audios, metrics, true, {}, {}, normalized.audios_sequence, {});
     const auto token_ids = tokenizer.encode(prompt).input_ids;
     const auto audio_id = tokenizer.encode("<|audio|>", add_special_tokens(false)).input_ids.data<const int64_t>()[0];
     const auto& per_layer_inputs = embedder.get_lm_extra_inputs().at("per_layer_inputs");
@@ -256,40 +268,42 @@ TEST(GGUFMultimodal, ModernAudioHistorySwitchEditAndRollback) {
         tensor.data<float>()[0] = value;
         return tensor;
     };
-    const auto count_features = [&](const ChatHistory& history, float value) {
+    // Embeds the whole normalized history with the audios the chat context resolved for it.
+    const auto count_features = [&](const VLMChatContext::ProcessedChatData& data, float value) {
         std::string prompt;
-        for (size_t i = 0; i < history.size(); ++i)
-            prompt += history[i]["content"].get_string();
+        for (size_t i = 0; i < data.normalized_history.size(); ++i)
+            prompt += data.normalized_history[i]["content"].get_string();
         VLMPerfMetrics metrics;
-        const auto features = embedder.get_inputs_embeds(prompt, {}, {}, metrics);
+        const auto features = embedder.get_inputs_embeds(
+            prompt, {}, {}, data.encoded_audios, metrics, true, {}, {}, data.audio_sequence, {});
         return std::count(features.data<const float>(), features.data<const float>() + features.get_size(), value);
     };
     ChatHistory first({{{"role", "user"}, {"content", "a<|audio|>b"}}});
     auto first_data = VLMChatContext(first, registry, embedder).process({}, {}, {}, {audio(7.f)});
-    EXPECT_EQ(count_features(first_data.normalized_history, 7.f), 8);
+    EXPECT_EQ(count_features(first_data, 7.f), 8);
     ChatHistory second({{{"role", "user"}, {"content", "<|audio|>"}}});
     auto second_data = VLMChatContext(second, registry, embedder).process({}, {}, {}, {audio(9.f)});
-    EXPECT_EQ(count_features(second_data.normalized_history, 9.f), 8);
+    EXPECT_EQ(count_features(second_data, 9.f), 8);
     first.push_back({{"role", "assistant"}, {"content", "a"}});
     first.push_back({{"role", "user"}, {"content", "b"}});
     first_data = VLMChatContext(first, registry, embedder).process({});
-    EXPECT_EQ(count_features(first_data.normalized_history, 7.f), 8);
-    EXPECT_EQ(count_features(first_data.normalized_history, 9.f), 0);
+    EXPECT_EQ(count_features(first_data, 7.f), 8);
+    EXPECT_EQ(count_features(first_data, 9.f), 0);
     first.push_back({{"role", "user"}, {"content", "<|audio|>"}});
     VLMChatContext cancelled(first, registry, embedder);
     auto cancelled_data = cancelled.process({}, {}, {}, {audio(11.f)});
-    EXPECT_EQ(count_features(cancelled_data.normalized_history, 11.f), 8);
+    EXPECT_EQ(count_features(cancelled_data, 11.f), 8);
     cancelled.rollback();
     first.pop_back();
     first_data = VLMChatContext(first, registry, embedder).process({});
-    EXPECT_EQ(count_features(first_data.normalized_history, 7.f), 8);
-    EXPECT_EQ(count_features(first_data.normalized_history, 11.f), 0);
+    EXPECT_EQ(count_features(first_data, 7.f), 8);
+    EXPECT_EQ(count_features(first_data, 11.f), 0);
     first[0]["content"] = "b<|audio|>a";
     first.pop_back();
     first.pop_back();
     first_data = VLMChatContext(first, registry, embedder).process({}, {}, {}, {audio(13.f)});
-    EXPECT_EQ(count_features(first_data.normalized_history, 13.f), 8);
-    EXPECT_EQ(count_features(first_data.normalized_history, 7.f), 0);
+    EXPECT_EQ(count_features(first_data, 13.f), 8);
+    EXPECT_EQ(count_features(first_data, 7.f), 0);
     first[0]["content"] = "a<|audio|>";
     VLMChatContext edited(first, registry, embedder);
     edited.process({}, {}, {}, {audio(17.f)});
