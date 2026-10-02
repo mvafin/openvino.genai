@@ -520,8 +520,8 @@ std::vector<ov::genai::EncodedVideo> InputsEmbedder::encode_videos(
     return m_impl->encode_videos(videos, videos_metadata);
 }
 
-void InputsEmbedder::encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) {
-    m_impl->encode_audios(audios, append_to_history);
+void InputsEmbedder::encode_audios(const std::vector<ov::Tensor>& audios) {
+    m_impl->encode_audios(audios);
 }
 
 std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedder::get_position_ids(const size_t inputs_embeds_size, const size_t history_size) {

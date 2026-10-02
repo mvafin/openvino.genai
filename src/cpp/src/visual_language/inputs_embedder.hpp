@@ -83,7 +83,9 @@ public:
         const std::vector<VideoMetadata>& videos_metadata = {}
     );
 
-    void encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history = false);
+    // Encodes this request's audios, which also become the whole audio context. A chat owner
+    // stores get_audio_features() per turn and restores the context with set_audio_history().
+    void encode_audios(const std::vector<ov::Tensor>& audios);
     std::vector<ov::Tensor> get_audio_features() const {
         return m_impl->get_audio_features();
     }
@@ -213,7 +215,7 @@ private:
             const std::vector<VideoMetadata>& videos_metadata = {}
         );
 
-        virtual void encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) {}
+        virtual void encode_audios(const std::vector<ov::Tensor>& audios) {}
         virtual std::vector<ov::Tensor> get_audio_features() const {
             return {};
         }

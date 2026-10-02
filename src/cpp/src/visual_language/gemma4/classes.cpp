@@ -384,27 +384,9 @@ InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& vlm_config,
     create_per_layer_embeddings_requests(compiled);
 }
 
-void InputsEmbedderGemma4::finish_chat() {
-    IInputsEmbedder::finish_chat();
+void InputsEmbedderGemma4::encode_audios(const std::vector<ov::Tensor>& audios) {
     m_audio_features.clear();
     m_audio_history.clear();
-    m_audio_chat = false;
-}
-
-void InputsEmbedderGemma4::update_chat_history(const std::string& decoded_results, GenerationStatus status) {
-    IInputsEmbedder::update_chat_history(decoded_results, status);
-    if (status == GenerationStatus::CANCEL) {
-        m_audio_history.resize(m_audio_history_before_turn);
-        m_audio_features.clear();
-    }
-}
-
-void InputsEmbedderGemma4::encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) {
-    if (!append_to_history || !m_audio_chat)
-        m_audio_history.clear();
-    m_audio_history_before_turn = m_audio_history.size();
-    m_audio_chat = append_to_history;
-    m_audio_features.clear();
     OPENVINO_ASSERT(audios.empty() || m_audio_encoder, "This GGUF pair has no audio encoder");
     if (audios.empty())
         return;
@@ -430,9 +412,9 @@ void InputsEmbedderGemma4::encode_audios(const std::vector<ov::Tensor>& audios, 
             std::memcpy(dst, chunk.data(), chunk.get_byte_size());
             dst += chunk.get_size();
         }
-        m_audio_features.push_back(features);
-        m_audio_history.push_back(std::move(features));
+        m_audio_features.push_back(std::move(features));
     }
+    m_audio_history = m_audio_features;
 }
 
 std::vector<ov::genai::EncodedImage> InputsEmbedderGemma4::encode_images(const std::vector<ov::Tensor>& images) {

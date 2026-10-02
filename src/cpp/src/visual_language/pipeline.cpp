@@ -116,6 +116,8 @@ class VLMPipeline::VLMPipelineImpl : public VLMBackend{
     // It stores encoded images, videos and vision count in case when m_use_full_chat_history is true
     std::vector<ov::genai::EncodedImage> m_encoded_images;
     std::vector<ov::genai::EncodedVideo> m_encoded_videos;
+    // Encoded audios of the legacy chat, in prompt order.
+    std::vector<ov::Tensor> m_history_audios;
     std::vector<std::pair<std::size_t, std::size_t>> m_history_vision_count;  // pair<video count, image count>
 
     std::string m_system_message;
@@ -451,7 +453,12 @@ public:
         const auto embeddings_start_time = std::chrono::steady_clock::now();
         
         const auto audio_encoding_start = std::chrono::steady_clock::now();
-        m_inputs_embedder->encode_audios(audios, m_is_chat_conversation);
+        m_inputs_embedder->encode_audios(audios);
+        const auto turn_audios = m_inputs_embedder->get_audio_features();
+        if (m_is_chat_conversation) {
+            m_history_audios.insert(m_history_audios.end(), turn_audios.begin(), turn_audios.end());
+            m_inputs_embedder->set_audio_history(m_history_audios);
+        }
         PerfMetrics::emplace_duration(perf_metrics.vlm_raw_metrics.audio_encoding_durations, audio_encoding_start);
 
         const auto vision_encoding_start = std::chrono::steady_clock::now();
@@ -549,6 +556,7 @@ public:
                 m_history.push_back({{"role", "assistant"}, {"content", decoded_results}});
             } else {
                 m_history.pop_back();
+                m_history_audios.resize(m_history_audios.size() - turn_audios.size());
                 if (m_use_full_chat_history) {
                     OPENVINO_ASSERT(images.size() <= m_encoded_images.size(), "Number of images to remove is more than stored images!");
                     m_encoded_images.resize(m_encoded_images.size() - images.size());
@@ -825,6 +833,7 @@ public:
         m_history.clear();
         m_encoded_images.clear();
         m_encoded_videos.clear();
+        m_history_audios.clear();
         m_history_vision_count.clear();
     }
 

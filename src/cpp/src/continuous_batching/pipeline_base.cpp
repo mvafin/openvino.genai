@@ -60,6 +60,7 @@ void ContinuousBatchingPipeline::IContinuousBatchingPipeline::finish_chat() {
     m_history.clear();
     m_history_images.clear();
     m_history_videos.clear();
+    m_history_audios.clear();
     m_history_image_ids.clear();
     m_history_video_ids.clear();
     m_history_vision_count.clear();
@@ -338,6 +339,7 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
 
     std::vector<VLMPerfMetrics> vlm_perf_metrics(prompts.size());
     std::vector<EncodedImage> encoded_images = {};
+    size_t turn_audios = 0;
     std::vector<EncodedVideo> encoded_videos = {};
     bool recalculate_merged_embeddings = images_vector.size() > 0 || videos_vector.size() > 0;
 
@@ -384,7 +386,11 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
         {
             std::lock_guard<std::mutex> lock(m_embeddings_mutex);
             const auto audio_encoding_start = std::chrono::steady_clock::now();
-            m_inputs_embedder->encode_audios(pending_audios(0), true);
+            m_inputs_embedder->encode_audios(pending_audios(0));
+            const auto features = m_inputs_embedder->get_audio_features();
+            turn_audios = features.size();
+            m_history_audios.insert(m_history_audios.end(), features.begin(), features.end());
+            m_inputs_embedder->set_audio_history(m_history_audios);
             PerfMetrics::emplace_duration(vlm_perf_metrics[0].vlm_raw_metrics.audio_encoding_durations, audio_encoding_start);
         }
 
@@ -522,6 +528,7 @@ ContinuousBatchingPipeline::IContinuousBatchingPipeline::generate(
             m_history.push_back({{"role", "assistant"}, {"content", results[0].texts[0]}});
         } else {
             m_history.pop_back();
+            m_history_audios.resize(m_history_audios.size() - turn_audios);
             for (size_t idx = 0; idx < encoded_images.size(); idx++) {
                 m_history_image_ids.pop_back();
                 m_history_images.pop_back();

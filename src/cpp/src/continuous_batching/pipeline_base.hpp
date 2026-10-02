@@ -55,6 +55,8 @@ protected:
     std::vector<ov::genai::EncodedImage> m_history_images;
     std::vector<size_t> m_history_image_ids;
     std::vector<ov::genai::EncodedVideo> m_history_videos;
+    // Encoded audios of the legacy chat, in prompt order.
+    std::vector<ov::Tensor> m_history_audios;
     std::vector<size_t> m_history_video_ids;
     std::vector<std::pair<std::size_t, std::size_t>> m_history_vision_count;  // pair<video count, image count>
     size_t m_image_id = 0;

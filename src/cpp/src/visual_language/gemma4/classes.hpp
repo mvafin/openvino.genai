@@ -67,18 +67,13 @@ public:
         const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count = {}) override;
 
     std::vector<ov::genai::EncodedImage> encode_images(const std::vector<ov::Tensor>& images) override;
-    void encode_audios(const std::vector<ov::Tensor>& audios, bool append_to_history) override;
+    void encode_audios(const std::vector<ov::Tensor>& audios) override;
     std::vector<ov::Tensor> get_audio_features() const override {
         return m_audio_features;
     }
     void set_audio_history(const std::vector<ov::Tensor>& features) override {
         m_audio_history = features;
-        m_audio_features.clear();
-        m_audio_history_before_turn = features.size();
-        m_audio_chat = true;
     }
-    void finish_chat() override;
-    void update_chat_history(const std::string& decoded_results, GenerationStatus status) override;
     void set_audio_encoder(AudioEncode encoder) override {
         m_audio_encoder = std::move(encoder);
     }
@@ -110,9 +105,8 @@ public:
 
 private:
     AudioEncode m_audio_encoder;
+    // This request's audio features, and every audio the prompt may reference.
     std::vector<ov::Tensor> m_audio_features, m_audio_history;
-    size_t m_audio_history_before_turn = 0;
-    bool m_audio_chat = false;
     int64_t m_audio_token_id = -1;
     // Per-layer text embeddings model (Gemma4-specific)
     std::unique_ptr<CircularBufferQueue<ov::InferRequest>> m_per_layer_embeddings_requests = nullptr;
