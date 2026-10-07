@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <regex>
 #include <set>
 
 #include "openvino/frontend/gguf/tokenizer_metadata.hpp"
@@ -24,6 +25,7 @@
 #include "openvino/op/slice.hpp"
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/unsqueeze.hpp"
+#include "utils.hpp"
 
 #ifdef _WIN32
 #    define NOMINMAX
@@ -1071,6 +1073,38 @@ create_tokenizer_from_parameters(const std::shared_ptr<void>& shared_object_ov_t
     return build_tokenizer_models(shared_object_ov_tokenizers, std::move(tokenizer_config));
 }
 
+std::set<int64_t> gguf_stop_token_ids(const ov::AnyMap& tokenizer_metadata) {
+    // Mirrors llama.cpp's end-of-generation set: eos/eot/eom plus known end-of-turn texts.
+    static const std::set<std::string> eog_texts{
+        "<|eot_id|>", "<|im_end|>", "<|end|>", "<|return|>", "<|call|>", "<|flush|>", "<|calls|>",
+        "<end_of_turn>", "<|endoftext|>", "</s>", "<|eom_id|>", "<EOT>", "_<EOT>", "[EOT]", "[EOS]",
+        "<|end_of_text|>", "<end_of_utterance>", "<eos>", "<turn|>", "<|tool_response>",
+        "<｜end▁of▁sentence｜>", "[e~["};
+    const auto config = tokenizer_config_from_rt_info(tokenizer_metadata);
+    std::set<int64_t> ids;
+    std::map<std::string, int64_t> found;
+    if (const auto* tokens = get_if_exist<std::vector<std::string>>(config, "tokens")) {
+        for (size_t i = 0; i < tokens->size(); ++i) {
+            if (eog_texts.count((*tokens)[i])) {
+                ids.insert(int64_t(i));
+                found.emplace((*tokens)[i], int64_t(i));
+            }
+        }
+    }
+    for (const char* key : {"eos_token_id", "eot_token_id", "eom_token_id"}) {
+        if (const auto id = read_tokenizer_id(config, key); id >= 0)
+            ids.insert(id);
+    }
+    // llama.cpp: harmony-style vocabularies end messages, not generation, with <|end|>;
+    // Gemma4 uses </s> as ordinary text.
+    if (found.count("<|end|>") && found.count("<|call|>") + found.count("<|calls|>") &&
+        found.count("<|return|>") + found.count("<|flush|>"))
+        ids.erase(found["<|end|>"]);
+    if (found.count("</s>") && found.count("<|tool_response>"))
+        ids.erase(found["</s>"]);
+    return ids;
+}
+
 namespace {
 std::shared_ptr<ov::frontend::gguf::GGUFTokenizerMetadata> find_tokenizer_metadata(
     const std::shared_ptr<ov::Model>& model) {
@@ -1108,7 +1142,10 @@ void erase_gguf_tokenizer_metadata(const std::shared_ptr<ov::Model>& model) {
 }
 
 std::string patch_gguf_chat_template(const std::string& chat_template) {
-    std::string patched_chat_template = chat_template;
+    // GGUF tokenizers are also used directly by LLMPipeline, without a family embedder
+    // to adapt these Qwen and Gemma Jinja constructs to minja.
+    std::string patched_chat_template =
+        utils::join_multiline_string_literals(utils::replace_is_undefined_tests(chat_template));
     // Define the exact pattern to find in original chat_template
     // Using C++ raw string literals (R"(...)") to correctly represent the literal content,
     const std::string qwen2_5_substring_to_find = R"({{\"name\": <function-name>, \"arguments\": <args-json-object>}})";

@@ -15,10 +15,21 @@ namespace ov::genai {
 class VisionEncoderMuseGlimmer : public VisionEncoder {
 public:
     using VisionEncoder::VisionEncoder;
+    VisionEncoderMuseGlimmer(const std::shared_ptr<ov::Model>& model,
+                             const ProcessorConfig& config,
+                             const std::string& device,
+                             const ov::AnyMap& properties);
 
     EncodedImage encode(const ov::Tensor& image, const ov::AnyMap& config_map = {}) override;
 
     EncodedVideo encode_frames(const std::vector<ov::Tensor>& frames) override;
+
+protected:
+    // Feeds the encoder from the patchified pixels and their [1, 3] (t, h, w) grid.
+    virtual void set_encoder_inputs(ov::InferRequest& encoder,
+                                    const ov::Tensor& pixel_values,
+                                    const ov::Tensor& image_grid_thw,
+                                    const ProcessorConfig& config);
 
 private:
     EncodedImage encode_with_config(const std::vector<ov::Tensor>& frames,
@@ -28,6 +39,12 @@ private:
 
 class InputsEmbedderMuseGlimmer : public InputsEmbedder::IInputsEmbedder {
 public:
+    InputsEmbedderMuseGlimmer(const VLMConfig& config,
+                              const Tokenizer& tokenizer,
+                              const VisionEncoder::Ptr& vision,
+                              const EmbeddingsModel::Ptr& embeddings,
+                              const std::string& device)
+        : IInputsEmbedder(config, tokenizer, vision, embeddings, device) {}
     InputsEmbedderMuseGlimmer(const VLMConfig& vlm_config,
                               const std::filesystem::path& model_dir,
                               const Tokenizer& tokenizer,

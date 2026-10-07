@@ -322,14 +322,18 @@ public:
             _schedule_generate_phase_dynamic_split_fuse(
                 sequence_groups, scheduler_output, typed_block_copy_map, linear_attention_reservations);
             // some tokens from generation prompt are also scheduled
-            _schedule_prompt_phase_dynamic_split_fuse(
-                sequence_groups, scheduler_output, linear_attention_reservations);
+            _schedule_prompt_phase_dynamic_split_fuse(sequence_groups,
+                                                      scheduler_output,
+                                                      typed_block_copy_map,
+                                                      linear_attention_reservations);
         } else {
             // vLLM case
             // schedule prompt phase using whole prompt's input_ids
 
-            _schedule_prompt_phase_vllm(
-                sequence_groups, scheduler_output, linear_attention_reservations);
+            _schedule_prompt_phase_vllm(sequence_groups,
+                                        scheduler_output,
+                                        typed_block_copy_map,
+                                        linear_attention_reservations);
 
             if (!scheduler_output.is_prompt) {
                 // prompt sequences are not scheduler => scheduler generation phase by dynamic_split_fuse implementation
@@ -580,6 +584,7 @@ private:
     void _schedule_prompt_phase_dynamic_split_fuse(
         std::vector<SequenceGroup::Ptr>& sequence_groups,
         Output& scheduler_output,
+        std::map<CacheType, std::map<size_t, std::list<size_t>>>& typed_block_copy_map,
         LinearAttentionReservationTransaction& linear_attention_reservations) {
         // in the current method we need to balance multiple prompts (or parts of prompts) between
         // available amount of tokens in megabatch
@@ -623,10 +628,18 @@ private:
                 num_scheduled_tokens = std::min(num_scheduled_tokens, m_cache_orchestrator->available_token_slots(sequence_group));
 
                 if (num_scheduled_tokens > 0) {
-                    // allocate KV blocks if required
-                    m_cache_orchestrator->allocate_tokens(sequence, sequence_group, num_scheduled_tokens, sequence_group->get_prompt_len());
-                    // and schedule tokens
                     sequence_group->schedule_tokens(num_scheduled_tokens);
+                    // A restored partial block is writable only after copy-on-write and
+                    // hash registration, just as in the generation phase. Recurrent
+                    // checkpoints replace their contents rather than append KV rows.
+                    while (!m_cache_orchestrator->can_append_slots(sequence_group) &&
+                           _try_increase_cache(sequence_group)) {
+                    }
+                    if (!m_cache_orchestrator->can_append_slots(sequence_group)) {
+                        sequence_group->clear_scheduled_tokens();
+                        continue;
+                    }
+                    _accumulate_block_copies(typed_block_copy_map, m_cache_orchestrator->append_slots(sequence_group));
 
                     // add information to scheduler_output
                     {
@@ -755,13 +768,7 @@ private:
                         _set_kv_paged_attention_data(scheduler_output, sequence_group, seq_id);
                     }
 
-                    for (auto& [type, copy_map] : per_type_copy_map) {
-                        auto& accumulated_copy_map = typed_block_copy_map[type];
-                        for (auto& [src_index, dst_indexes] : copy_map) {
-                            auto& accumulated_dst_indexes = accumulated_copy_map[src_index];
-                            accumulated_dst_indexes.splice(accumulated_dst_indexes.end(), dst_indexes);
-                        }
-                    }
+                    _accumulate_block_copies(typed_block_copy_map, std::move(per_type_copy_map));
 
                     // fill linear attention block tables if registered
                     if (m_cache_orchestrator->has_linear_attention_cache()) {
@@ -787,10 +794,10 @@ private:
         }
     }
 
-    void _schedule_prompt_phase_vllm(
-        std::vector<SequenceGroup::Ptr>& sequence_groups,
-        Output& scheduler_output,
-        LinearAttentionReservationTransaction& linear_attention_reservations) {
+    void _schedule_prompt_phase_vllm(std::vector<SequenceGroup::Ptr>& sequence_groups,
+                                     Output& scheduler_output,
+                                     std::map<CacheType, std::map<size_t, std::list<size_t>>>& typed_block_copy_map,
+                                     LinearAttentionReservationTransaction& linear_attention_reservations) {
         // Current scheduling method schedules prompts only in a manner similar to vLLM:
         // - Limits max batch size by:
         //   - max_num_seqs (256 in vLLM's defaults)
@@ -844,7 +851,7 @@ private:
                     sequence_group->schedule_tokens(sequence_len);
 
                     // allocate KV blocks
-                    m_cache_orchestrator->append_slots(sequence_group);
+                    _accumulate_block_copies(typed_block_copy_map, m_cache_orchestrator->append_slots(sequence_group));
 
                     // add information to scheduler_output
                     {
@@ -1233,6 +1240,16 @@ private:
             },
             plan);
         scheduler_output.set_linear_attention_paging_data(seq_id, std::move(paging_data));
+    }
+
+    using TypedBlockCopyMap = std::map<CacheType, std::map<size_t, std::list<size_t>>>;
+    static void _accumulate_block_copies(TypedBlockCopyMap& accumulated, TypedBlockCopyMap copies) {
+        for (auto& [type, copy_map] : copies) {
+            for (auto& [source, destinations] : copy_map) {
+                auto& target = accumulated[type][source];
+                target.splice(target.end(), destinations);
+            }
+        }
     }
 
     void _set_kv_paged_attention_data(Output& scheduler_output,

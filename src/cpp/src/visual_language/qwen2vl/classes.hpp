@@ -60,6 +60,12 @@ private:
 
 class InputsEmbedderQwen2VL : public InputsEmbedder::IInputsEmbedder {
 public:
+    InputsEmbedderQwen2VL(const VLMConfig& config,
+                          const Tokenizer& tokenizer,
+                          const VisionEncoder::Ptr& vision,
+                          const EmbeddingsModel::Ptr& embeddings,
+                          const std::string& device);
+
     InputsEmbedderQwen2VL(
         const VLMConfig& vlm_config,
         const std::filesystem::path& model_dir,

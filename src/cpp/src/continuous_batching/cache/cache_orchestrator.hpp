@@ -260,7 +260,10 @@ public:
                 return;
             }
 
-            auto la_plan = la_block_mgr.get_prefix_restore_plan(sequence_group, kv_plan.cache_token_position);
+            // Recurrent states cannot roll back one token as KV blocks can. Keep at
+            // least one prompt token outside the restored checkpoint to compute logits.
+            const size_t restore_limit = std::min(kv_plan.cache_token_position, sequence_group->get_prompt_len() - 1);
+            auto la_plan = la_block_mgr.get_prefix_restore_plan(sequence_group, restore_limit);
             if (la_plan.empty()) {
                 return;
             }
