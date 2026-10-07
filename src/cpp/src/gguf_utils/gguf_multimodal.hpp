@@ -7,26 +7,20 @@
 
 #include "openvino/core/model.hpp"
 #include "openvino/genai/tokenizer.hpp"
-#include "visual_language/processor_config.hpp"
-#include "visual_language/vlm_config.hpp"
+#include "visual_language/vlm_models.hpp"
 
 namespace ov::genai {
-class VisionEncoder;
 class InputsEmbedder;
 struct GGUFMultimodalModels {
-    std::shared_ptr<ov::Model> language, text_embeddings, per_layer_embeddings, vision, audio;
+    std::shared_ptr<ov::Model> language, audio;
+    VLMModels vlm;
     Tokenizer tokenizer;
     std::set<int64_t> stop_token_ids;
-    VLMConfig config;
-    ProcessorConfig processor;
 };
 
 GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
                                           const std::filesystem::path& mmproj,
                                           const ov::AnyMap& properties);
-std::shared_ptr<VisionEncoder> create_gguf_vision_encoder(const GGUFMultimodalModels& models,
-                                                          const std::string& device,
-                                                          const ov::AnyMap& properties);
 void attach_gguf_audio_encoder(InputsEmbedder& embedder,
                                const GGUFMultimodalModels& models,
                                const std::string& device,

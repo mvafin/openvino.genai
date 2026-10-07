@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
-#include <regex>
 #include <set>
 
 #include "openvino/frontend/gguf/tokenizer_metadata.hpp"
@@ -145,7 +144,11 @@ std::string quote_meta(const std::string& str) {
     return result;
 }
 
-std::string join_special_tokens(const std::vector<std::string>& special_tokens) {
+std::string join_special_tokens(std::vector<std::string> special_tokens) {
+    // Longest match first, as in llama.cpp and HF.
+    std::stable_sort(special_tokens.begin(), special_tokens.end(), [](const std::string& a, const std::string& b) {
+        return a.size() > b.size();
+    });
     std::ostringstream oss;
     for (size_t i = 0; i < special_tokens.size(); ++i) {
         if (i > 0)
@@ -156,6 +159,13 @@ std::string join_special_tokens(const std::vector<std::string>& special_tokens) 
 }
 
 std::vector<std::string> get_split_regex(const std::string& pre) {
+    // llama.cpp GPT4O pre-type
+    static const std::string gpt4o =
+        "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+"
+        "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?"
+        "[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*"
+        "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|"
+        "\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
     // taken from
     // https://github.com/ggml-org/llama.cpp/blob/8551c44d840a7db50adb958ccaf464dc3ded82e7/src/llama-vocab.cpp#L279
     // TODO: complete for other archs
@@ -173,6 +183,13 @@ std::vector<std::string> get_split_regex(const std::string& pre) {
              "\\p{N}",
              "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)",
          }},
+        {"qwen35",
+         {
+             "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\\r\\n\\p{L}\\p{N}]?[\\p{L}\\p{M}]+|\\p{N}| "
+             "?[^\\s\\p{L}\\p{M}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
+         }},
+        {"gpt-4o", {gpt4o}},
+        {"llama4", {gpt4o}},
     };
 
     if (regex_map.count(pre)) {
@@ -723,7 +740,7 @@ static ov::OutputVector parse_spm_config(const std::map<std::string, GGUFMetaDat
 
     // Build the serialized ModelProto and wrap as a u8 Constant (first input to SentencepieceTokenizer)
     auto proto_bytes =
-        build_spm_model_proto(vocab, scores, token_types, add_space_prefix, true, unk_id, bos_id, eos_id, pad_id);
+        build_spm_model_proto(vocab, scores, token_types, add_space_prefix, false, unk_id, bos_id, eos_id, pad_id);
     auto sp_model_const = std::make_shared<v0::Constant>(element::u8, Shape{proto_bytes.size()}, proto_bytes.data());
 
     // inputs = SpecialTokensSplit outputs: [ragged_begins(0), ragged_ends(1), begins(2), ends(3), chars(4), ...]
@@ -733,14 +750,18 @@ static ov::OutputVector parse_spm_config(const std::map<std::string, GGUFMetaDat
     // SentencePiece deliberately does not encode CONTROL pieces from their spelling.
     // Chat delimiters and media markers must use their GGUF IDs even when automatic
     // BOS/EOS insertion is disabled. Use the tokenizer op's explicit special-token map.
-    std::vector<std::vector<uint8_t>> special_pieces;
     std::vector<int32_t> special_ids;
     for (size_t i = 0; i < vocab.size(); ++i) {
-        if (is_special_token(token_types[i])) {
-            special_pieces.emplace_back(vocab[i].begin(), vocab[i].end());
+        if (is_special_token(token_types[i]))
             special_ids.push_back(static_cast<int32_t>(i));
-        }
     }
+    // Longest match first, as in llama.cpp and HF.
+    std::stable_sort(special_ids.begin(), special_ids.end(), [&vocab](int32_t a, int32_t b) {
+        return vocab[a].size() > vocab[b].size();
+    });
+    std::vector<std::vector<uint8_t>> special_pieces;
+    for (const auto id : special_ids)
+        special_pieces.emplace_back(vocab[id].begin(), vocab[id].end());
     if (!special_ids.empty()) {
         auto pieces = create_string_constant(special_pieces);
         sp_inputs.insert(sp_inputs.end(), pieces.begin(), pieces.end());
@@ -1080,19 +1101,23 @@ std::set<int64_t> gguf_stop_token_ids(const ov::AnyMap& tokenizer_metadata) {
         "<end_of_turn>", "<|endoftext|>", "</s>", "<|eom_id|>", "<EOT>", "_<EOT>", "[EOT]", "[EOS]",
         "<|end_of_text|>", "<end_of_utterance>", "<eos>", "<turn|>", "<|tool_response>",
         "<｜end▁of▁sentence｜>", "[e~["};
-    const auto config = tokenizer_config_from_rt_info(tokenizer_metadata);
     std::set<int64_t> ids;
     std::map<std::string, int64_t> found;
-    if (const auto* tokens = get_if_exist<std::vector<std::string>>(config, "tokens")) {
-        for (size_t i = 0; i < tokens->size(); ++i) {
-            if (eog_texts.count((*tokens)[i])) {
+    if (const auto it = tokenizer_metadata.find("tokens");
+        it != tokenizer_metadata.end() && it->second.is<std::vector<std::string>>()) {
+        const auto& tokens = it->second.as<std::vector<std::string>>();
+        for (size_t i = 0; i < tokens.size(); ++i) {
+            if (eog_texts.count(tokens[i])) {
                 ids.insert(int64_t(i));
-                found.emplace((*tokens)[i], int64_t(i));
+                found.emplace(tokens[i], int64_t(i));
             }
         }
     }
     for (const char* key : {"eos_token_id", "eot_token_id", "eom_token_id"}) {
-        if (const auto id = read_tokenizer_id(config, key); id >= 0)
+        const auto it = tokenizer_metadata.find(key);
+        if (it == tokenizer_metadata.end())
+            continue;
+        if (const auto id = read_tokenizer_id(tokenizer_config_from_rt_info({*it}), key); id >= 0)
             ids.insert(id);
     }
     // llama.cpp: harmony-style vocabularies end messages, not generation, with <|end|>;
@@ -1142,10 +1167,7 @@ void erase_gguf_tokenizer_metadata(const std::shared_ptr<ov::Model>& model) {
 }
 
 std::string patch_gguf_chat_template(const std::string& chat_template) {
-    // GGUF tokenizers are also used directly by LLMPipeline, without a family embedder
-    // to adapt these Qwen and Gemma Jinja constructs to minja.
-    std::string patched_chat_template =
-        utils::join_multiline_string_literals(utils::replace_is_undefined_tests(chat_template));
+    std::string patched_chat_template = chat_template;
     // Define the exact pattern to find in original chat_template
     // Using C++ raw string literals (R"(...)") to correctly represent the literal content,
     const std::string qwen2_5_substring_to_find = R"({{\"name\": <function-name>, \"arguments\": <args-json-object>}})";

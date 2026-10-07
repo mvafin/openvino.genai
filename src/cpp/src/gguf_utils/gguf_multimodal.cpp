@@ -4,16 +4,118 @@
 #include "gguf_multimodal.hpp"
 
 #include <algorithm>
-#include <cmath>
+#include <nlohmann/json.hpp>
 #include <sstream>
 
-#include "gguf_modeling.hpp"
 #include "gguf_tokenizer.hpp"
 #include "openvino/frontend/gguf/adapt_mmproj_to_genai.hpp"
 #include "openvino/frontend/gguf/extension/genai.hpp"
 #include "openvino/frontend/gguf/frontend.hpp"
+#include "openvino/frontend/gguf/genai_vision.hpp"
 
 namespace ov::genai {
+namespace {
+using nlohmann::json;
+
+class MmprojMetadata {
+public:
+    explicit MmprojMetadata(const std::shared_ptr<ov::Model>& mmproj) : m_mmproj(mmproj) {}
+    bool has(const std::string& key) const {
+        return m_mmproj->has_rt_info({"gguf_mmproj", key});
+    }
+    std::string text(const std::string& key) const {
+        return m_mmproj->get_rt_info<std::string>({"gguf_mmproj", key});
+    }
+    size_t integer(const std::string& key) const {
+        return std::stoull(text(key));
+    }
+    size_t integer(const std::string& key, size_t fallback) const {
+        return has(key) ? integer(key) : fallback;
+    }
+    std::vector<float> floats(const std::string& key) const {
+        std::vector<float> values;
+        std::istringstream stream(text(key));
+        for (std::string field; std::getline(stream, field, ',');)
+            values.push_back(std::stof(field));
+        return values;
+    }
+
+private:
+    std::shared_ptr<ov::Model> m_mmproj;
+};
+
+struct Configs {
+    json config, image, video;
+};
+
+// GGUF stores only the encoder geometry; other settings are the HF processor defaults.
+Configs hf_configs(const std::string& architecture,
+                   const std::string& projector,
+                   const MmprojMetadata& meta,
+                   const GGUFMultimodalModels& models) {
+    Configs c;
+    const auto patch = meta.integer("clip.vision.patch_size");
+    c.config["hidden_size"] = models.language->input("inputs_embeds").get_partial_shape()[2].get_length();
+    c.config["vision_config"]["patch_size"] = patch;
+    c.image["patch_size"] = patch;
+    c.image["image_mean"] = meta.floats("clip.vision.image_mean");
+    c.image["image_std"] = meta.floats("clip.vision.image_std");
+    if (architecture == "gemma3") {
+        const auto size = meta.integer("clip.vision.image_size");
+        c.config["model_type"] = "gemma3";
+        c.image["size"] = {{"height", size}, {"width", size}};
+        c.video = c.image;
+        return c;
+    }
+    if (architecture == "gemma4") {
+        const bool unified = projector == "gemma4uv";
+        c.config["model_type"] = unified ? "gemma4_unified" : "gemma4";
+        if (const auto per_layer = models.vlm.find("text_embeddings_per_layer"))
+            c.config["text_config"]["hidden_size_per_layer_input"] =
+                per_layer->output().get_partial_shape()[3].get_length();
+        const auto& inputs = models.language->inputs();
+        if (std::any_of(inputs.begin(), inputs.end(), [](const ov::Output<ov::Node>& input) {
+                return input.get_names().count("token_type_ids") > 0;
+            }))
+            c.config["text_config"]["use_bidirectional_attention"] = "vision";
+        c.image["pooling_kernel_size"] = meta.integer("clip.vision.projector.scale_factor", 3);
+        c.image["max_soft_tokens"] = unified ? 70 : 280;
+        c.video = c.image;
+        c.video["max_soft_tokens"] = 70;
+        c.video["num_frames"] = 32;
+        c.video["do_sample_frames"] = true;
+        return c;
+    }
+    const auto merge = meta.integer("vision.merge");
+    c.image["merge_size"] = merge;
+    if (architecture == "muse-glimmer") {
+        c.config["model_type"] = "muse_glimmer";
+        // GGUF collapses HF's two-frame patch kernel.
+        c.image["temporal_patch_size"] = 1;
+        c.image["max_image_tokens"] = 4096;
+        c.video = c.image;
+        c.video["fps"] = 2.f;
+        c.video["num_frames"] = 96;
+        c.video["max_video_frame_tokens"] = 144;
+        c.video["do_sample_frames"] = true;
+        return c;
+    }
+    c.config["model_type"] = architecture == "qwen35moe" ? "qwen3_5_moe" : "qwen3_5";
+    const auto side = meta.integer("clip.vision.image_size") / patch;
+    c.config["vision_config"]["num_position_embeddings"] = side * side;
+    c.image["temporal_patch_size"] = 2;
+    c.image["size"] = {{"shortest_edge", meta.integer("clip.vision.image_min_pixels", 65536)},
+                       {"longest_edge", meta.integer("clip.vision.image_max_pixels", 16777216)}};
+    c.video = c.image;
+    c.video["size"] = {{"shortest_edge", 4096}, {"longest_edge", 25165824}};
+    c.video["fps"] = 2.f;
+    c.video["min_frames"] = 4;
+    c.video["max_frames"] = 768;
+    c.video["do_sample_frames"] = true;
+    return c;
+}
+}  // namespace
+
 GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
                                           const std::filesystem::path& mmproj,
                                           const ov::AnyMap& properties) {
@@ -28,108 +130,39 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     result.tokenizer = Tokenizer(GGUFTokenizerParameters(std::move(tokenizer_metadata)), properties);
     gguf::FrontEnd projector_frontend;
     auto combined = projector_frontend.convert(projector_frontend.load(mmproj.string()));
+    const MmprojMetadata meta(combined);
     const auto architecture = result.language->get_rt_info<std::string>("gguf_architecture");
-    const auto projector = combined->get_rt_info<std::string>({"gguf_mmproj", "vision.projector"});
-    const bool qwen = architecture == "qwen35" || architecture == "qwen35moe";
+    const auto projector = meta.text("vision.projector");
     const bool gemma4 = architecture == "gemma4" && (projector == "gemma4v" || projector == "gemma4uv");
-    const bool muse = architecture == "muse-glimmer" && projector == "muse-glimmer";
-    OPENVINO_ASSERT((architecture == "gemma3" && projector == "gemma3") || (qwen && projector == "qwen3vl_merger") ||
-                        gemma4 || muse,
+    OPENVINO_ASSERT((architecture == "gemma3" && projector == "gemma3") ||
+                        ((architecture == "qwen35" || architecture == "qwen35moe") && projector == "qwen3vl_merger") ||
+                        (architecture == "muse-glimmer" && projector == "muse-glimmer") || gemma4,
                     "Unsupported GGUF language/projector pair: ",
                     architecture,
                     " / ",
                     projector);
 
-    // Read the processor metadata off the freshly converted mmproj before the adapter pass
-    // rewrites the graph, so the model can then be adapted in place instead of cloned.
-    const auto integer = [&](const std::string& key) {
-        return std::stoull(combined->get_rt_info<std::string>({"gguf_mmproj", key}));
-    };
-    result.processor.size_height = result.processor.size_width = integer("clip.vision.image_size");
-    result.processor.patch_size = integer("clip.vision.patch_size");
-    result.config.vision_config_patch_size = result.processor.patch_size;
-    const auto array = [&](const std::string& key, std::array<float, 3>& values, bool positive) {
-        std::istringstream stream(combined->get_rt_info<std::string>({"gguf_mmproj", key}));
-        for (size_t i = 0; i < values.size(); ++i) {
-            std::string field;
-            OPENVINO_ASSERT(std::getline(stream, field, ','), "Missing GGUF processor value ", key);
-            values[i] = std::stof(field);
-            OPENVINO_ASSERT(std::isfinite(values[i]) && (!positive || values[i] > 0),
-                            "Invalid GGUF processor value ",
-                            key);
-        }
-    };
-    array("clip.vision.image_mean", result.processor.image_mean, /*positive=*/false);
-    array("clip.vision.image_std", result.processor.image_std, /*positive=*/true);
-
-    result.text_embeddings = genai->get_embedding_model();
-    result.per_layer_embeddings = genai->get_per_layer_embedding_model();
-    if (result.per_layer_embeddings)
-        result.config.hidden_size_per_layer_input =
-            result.per_layer_embeddings->output().get_partial_shape()[3].get_length();
-    if (gemma4 && combined->has_rt_info({"gguf_mmproj", "audio.projector"})) {
+    if (gemma4 && meta.has("audio.projector")) {
         result.audio = combined->clone();
         gguf::pass::AdaptMmprojToGenAI(gguf::pass::AdaptMmprojToGenAI::Modality::AUDIO).run_on_model(result.audio);
     }
-    result.vision = combined;
-    gguf::pass::AdaptMmprojToGenAI(gguf::pass::AdaptMmprojToGenAI::Modality::VISION).run_on_model(result.vision);
-    const auto width = result.language->input("inputs_embeds").get_partial_shape()[2];
-    OPENVINO_ASSERT(width == result.vision->output().get_partial_shape()[2],
-                    "GGUF language and mmproj embedding widths do not match");
-    result.config.hidden_size = width.get_length();
-    result.config.scale_emb = 1.f;
-    const auto set_pixel_bounds = [&](size_t min_tokens, size_t max_tokens) {
-        const auto factor = result.processor.patch_size * result.processor.merge_size;
-        result.processor.min_pixels = min_tokens * factor * factor;
-        result.processor.max_pixels = max_tokens * factor * factor;
-    };
-    if (muse) {
-        result.config.model_type = VLMModelType::MUSE_GLIMMER;
-        result.processor.merge_size = integer("vision.merge");
-        // llama.cpp's Muse GGUF stores the temporally collapsed image patch kernel.
-        result.processor.temporal_patch_size = 1;
-        result.processor.max_image_tokens = 4096;
-        return result;
+    auto& vlm = result.vlm;
+    vlm.models = gguf::genai_vision_models(combined);
+    vlm.models["text_embeddings"] = genai->get_embedding_model();
+    if (const auto& per_layer = genai->get_per_layer_embedding_model())
+        vlm.models["text_embeddings_per_layer"] = per_layer;
+
+    const auto configs = hf_configs(architecture, projector, meta, result);
+    vlm.config = VLMConfig(configs.config);
+    vlm.processor_config = ProcessorConfig(configs.image);
+    vlm.video_processor_config = VideoProcessorConfig(configs.video);
+    if (architecture == "gemma3") {
+        // GGUF Gemma3 vocabularies lack <image_soft_token>; <pad> only marks image positions.
+        vlm.config.image_soft_token = "<pad>";
+        const auto placeholder = result.tokenizer.encode(vlm.config.image_soft_token, add_special_tokens(false));
+        OPENVINO_ASSERT(placeholder.input_ids.get_size() == 1,
+                        "GGUF Gemma3 requires a single-token padding placeholder for image assembly");
     }
-    if (qwen) {
-        result.config.model_type = architecture == "qwen35moe" ? VLMModelType::QWEN3_5_MOE : VLMModelType::QWEN3_5;
-        result.processor.merge_size = integer("vision.merge");
-        result.processor.temporal_patch_size = 2;
-        set_pixel_bounds(8, 4096);
-        for (auto entry : {std::make_pair("clip.vision.image_min_pixels", &result.processor.min_pixels),
-                           std::make_pair("clip.vision.image_max_pixels", &result.processor.max_pixels)}) {
-            if (combined->has_rt_info({"gguf_mmproj", entry.first}))
-                *entry.second = integer(entry.first);
-        }
-        return result;
-    }
-    if (gemma4) {
-        result.config.model_type = projector == "gemma4uv" ? VLMModelType::GEMMA4_UNIFIED : VLMModelType::GEMMA4;
-        result.processor.merge_size = integer("vision.merge");
-        if (projector == "gemma4uv") {
-            result.processor.patch_size *= combined->has_rt_info({"gguf_mmproj", "clip.vision.projector.scale_factor"})
-                                               ? integer("clip.vision.projector.scale_factor")
-                                               : 3;
-            result.processor.merge_size = 1;
-        }
-        result.config.vision_config_patch_size = result.processor.patch_size;
-        set_pixel_bounds(70, 1120);
-        // AdaptToGenAI adds token_type_ids exactly for models with bidirectional image attention.
-        const auto& inputs = result.language->inputs();
-        const bool token_types = std::any_of(inputs.begin(), inputs.end(), [](const ov::Output<ov::Node>& input) {
-            return input.get_names().count("token_type_ids") > 0;
-        });
-        result.config.use_bidirectional_attention = token_types ? "vision" : "";
-        return result;
-    }
-    result.config.model_type = VLMModelType::GEMMA3;
-    // GGUF Gemma3 vocabularies do not contain HF's added <image_soft_token>.
-    // Use the existing padding token only as an assembly placeholder; every occurrence
-    // is replaced with a projected image vector before language-model inference.
-    result.config.image_soft_token = "<pad>";
-    const auto placeholder = result.tokenizer.encode(result.config.image_soft_token, add_special_tokens(false));
-    OPENVINO_ASSERT(placeholder.input_ids.get_size() == 1,
-                    "GGUF Gemma3 requires a single-token padding placeholder for image assembly");
     return result;
 }
 }  // namespace ov::genai

@@ -2,20 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "visual_language/qwen2vl/classes.hpp"
-
-#include "utils.hpp"
 #include "visual_language/qwen3_5/classes.hpp"
 
 namespace ov::genai {
 
-InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(const VLMConfig& config,
+InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(const VLMModels& models,
                                              const Tokenizer& tokenizer,
-                                             const VisionEncoder::Ptr& vision,
-                                             const EmbeddingsModel::Ptr& embeddings,
-                                             const std::string& device)
-    : InputsEmbedderQwen3VL(config, tokenizer, vision, embeddings, device) {
-    patch_chat_template();
-}
+                                             const std::string& device,
+                                             const ov::AnyMap& properties)
+    : InputsEmbedderQwen3VL(models, tokenizer, device, properties) {}
 
 InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(
     const VLMConfig& vlm_config,
@@ -23,9 +18,7 @@ InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(
     const Tokenizer& tokenizer,
     const std::string& device,
     const ov::AnyMap device_config
-) : InputsEmbedderQwen3VL(vlm_config, model_dir, tokenizer, device, device_config) {
-    patch_chat_template();
-}
+) : InputsEmbedderQwen3VL(vlm_config, model_dir, tokenizer, device, device_config) {}
 
 InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(
     const VLMConfig& vlm_config,
@@ -34,14 +27,7 @@ InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(
     const std::filesystem::path& config_dir_path,
     const std::string& device,
     const ov::AnyMap device_config
-) : InputsEmbedderQwen3VL(vlm_config, models_map, tokenizer, config_dir_path, device, device_config) {
-    patch_chat_template();
-}
-
-void InputsEmbedderQwen3_5::patch_chat_template() {
-    // e.g. "if enable_thinking is undefined" in the Qwen3.8 chat template.
-    m_tokenizer.set_chat_template(utils::replace_is_undefined_tests(m_tokenizer.get_chat_template()));
-}
+) : InputsEmbedderQwen3VL(vlm_config, models_map, tokenizer, config_dir_path, device, device_config) {}
 
 std::pair<ov::Tensor, int64_t> InputsEmbedderQwen3_5::create_position_ids(
     const ov::Tensor& input_ids_tensor,

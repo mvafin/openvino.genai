@@ -502,12 +502,6 @@ std::string join_multiline_string_literals(const std::string& chat_template);
  */
 std::string replace_is_undefined_tests(const std::string& chat_template);
 
-/**
- * @brief Patches the chat template in the provided Tokenizer and
- * removes any implicit concatenation of adjacent multiline string literals.
- */
-void patch_chat_template_multiline_strings(Tokenizer& tokenizer);
-
 }  // namespace utils
 }  // namespace genai
 }  // namespace ov

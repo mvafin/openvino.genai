@@ -23,20 +23,16 @@ public:
 
     EncodedVideo encode_frames(const std::vector<ov::Tensor>& frames) override;
 
-protected:
-    virtual EncodedImage encode_with_config(const ov::Tensor& image, const ProcessorConfig& config);
+private:
+    EncodedImage encode_with_config(const ov::Tensor& image, const ProcessorConfig& config);
 };
 
 class InputsEmbedderGemma4 : public InputsEmbedder::IInputsEmbedder {
 public:
-    // In-memory GGUF models; media positions take the per-layer padding row, as in llama.cpp.
-    InputsEmbedderGemma4(const VLMConfig& config,
+    InputsEmbedderGemma4(const VLMModels& models,
                          const Tokenizer& tokenizer,
-                         const VisionEncoder::Ptr& vision,
-                         const EmbeddingsModel::Ptr& embeddings,
                          const std::string& device,
-                         const std::shared_ptr<ov::Model>& per_layer_embeddings = nullptr,
-                         const ov::AnyMap& properties = {});
+                         const ov::AnyMap& properties);
     InputsEmbedderGemma4(const VLMConfig& vlm_config,
                          const std::filesystem::path& model_dir,
                          const Tokenizer& tokenizer,
@@ -124,7 +120,6 @@ private:
     int64_t m_audio_token_id = -1;
     // Per-layer text embeddings model (Gemma4-specific)
     std::unique_ptr<CircularBufferQueue<ov::InferRequest>> m_per_layer_embeddings_requests = nullptr;
-    bool m_pad_media_per_layer_inputs = false;
     void create_per_layer_embeddings_requests(ov::CompiledModel compiled);
 
     // Extra inputs to pass to the language model
@@ -151,7 +146,6 @@ private:
 
     void encode_vision_token_ids();
 
-    void patch_chat_template();
 };
 
 }  // namespace ov::genai

@@ -39,6 +39,7 @@ def main():
     prefix.add_argument("--no-prefix-caching", dest="prefix_caching", action="store_false")
     parser.set_defaults(prefix_caching=None)
     args = parser.parse_args()
+    schedule_path = Path(str(args.reference) + ".tokens")
     properties = dict(GGUF_READER="FRONTEND", ATTENTION_BACKEND=args.backend,
                       INFERENCE_PRECISION_HINT="f32", KV_CACHE_PRECISION="f16",
                       DYNAMIC_QUANTIZATION_GROUP_SIZE=0, INFERENCE_NUM_THREADS=4)
@@ -49,7 +50,7 @@ def main():
     report = dict(model=str(args.model.resolve()), backend=args.backend,
                   reference=str(args.reference.resolve()), reference_kind=args.reference_kind,
                   reference_sha256=hashlib.sha256(args.reference.read_bytes()).hexdigest(),
-                  reference_schedule_sha256=hashlib.sha256(Path(str(args.reference) + ".tokens").read_bytes()).hexdigest(),
+                  reference_schedule_sha256=hashlib.sha256(schedule_path.read_bytes()).hexdigest(),
                   q4_k_zp_f16=os.environ.get("OV_GGUF_Q4_K_ZP_F16"),
                   openvino_version=ov.get_version(), genai_version=genai.__version__,
                   fresh_accuracy=args.fresh_accuracy,
@@ -88,7 +89,7 @@ def main():
     logits = np.fromfile(args.reference, np.float32, offset=4).reshape(-1, vocab)
     expected = logits.argmax(-1).tolist()
     schedule = [list(map(int, line.split()))[1:]
-                for line in Path(str(args.reference) + ".tokens").read_text().splitlines()]
+                for line in schedule_path.read_text().splitlines()]
     assert len(schedule) == len(expected) and len(schedule) > 0
     prompt = "The capital of France is"
     generation = dict(max_new_tokens=13, min_new_tokens=13, apply_chat_template=False)

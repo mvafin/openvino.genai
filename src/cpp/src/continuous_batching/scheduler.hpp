@@ -29,6 +29,8 @@ namespace ov::genai {
 // violates the one-definition rule when the complete library is linked.
 class ContinuousBatchingScheduler {
 public:
+    using TypedBlockCopyMap = std::map<CacheType, std::map<size_t, std::list<size_t>>>;
+
     // Stable data that doesn't change across scheduling calls
     struct KVPagedAttentionGlobalData {
         KVPagedAttentionGlobalData() = default;
@@ -302,7 +304,7 @@ public:
         Output scheduler_output;
         scheduler_output.set_kv_paged_attention_global_data(m_kv_paged_attention_global_data);
         // map of src -> dst blocks copies per cache type
-        std::map<CacheType, std::map<size_t, std::list<size_t>>> typed_block_copy_map;
+        TypedBlockCopyMap typed_block_copy_map;
 
         // free some blocks taken by non-confirmed candidates in SD / prompt look-up
         clean_empty_blocks(sequence_groups);
@@ -584,7 +586,7 @@ private:
     void _schedule_prompt_phase_dynamic_split_fuse(
         std::vector<SequenceGroup::Ptr>& sequence_groups,
         Output& scheduler_output,
-        std::map<CacheType, std::map<size_t, std::list<size_t>>>& typed_block_copy_map,
+        TypedBlockCopyMap& typed_block_copy_map,
         LinearAttentionReservationTransaction& linear_attention_reservations) {
         // in the current method we need to balance multiple prompts (or parts of prompts) between
         // available amount of tokens in megabatch
@@ -632,10 +634,11 @@ private:
                     // A restored partial block is writable only after copy-on-write and
                     // hash registration, just as in the generation phase. Recurrent
                     // checkpoints replace their contents rather than append KV rows.
-                    while (!m_cache_orchestrator->can_append_slots(sequence_group) &&
+                    bool can_append = false;
+                    while (!(can_append = m_cache_orchestrator->can_append_slots(sequence_group)) &&
                            _try_increase_cache(sequence_group)) {
                     }
-                    if (!m_cache_orchestrator->can_append_slots(sequence_group)) {
+                    if (!can_append) {
                         sequence_group->clear_scheduled_tokens();
                         continue;
                     }
@@ -673,7 +676,7 @@ private:
 
     void _schedule_generate_phase_dynamic_split_fuse(const std::vector<SequenceGroup::Ptr>& sequence_groups,
                                                      Output& scheduler_output,
-                                                     std::map<CacheType, std::map<size_t, std::list<size_t>>>& typed_block_copy_map,
+                                                     TypedBlockCopyMap& typed_block_copy_map,
                                                      LinearAttentionReservationTransaction& linear_attention_reservations) {
         for (size_t sequence_group_id = 0; sequence_group_id < sequence_groups.size(); ++sequence_group_id) {
             SequenceGroup::Ptr sequence_group = sequence_groups[sequence_group_id];
@@ -753,7 +756,7 @@ private:
                 }
 
                 // allocate new slots
-                std::map<CacheType, std::map<size_t, std::list<size_t>>> per_type_copy_map = m_cache_orchestrator->append_slots(sequence_group);
+                TypedBlockCopyMap per_type_copy_map = m_cache_orchestrator->append_slots(sequence_group);
 
                 // add information to scheduler_output
                 {
@@ -796,7 +799,7 @@ private:
 
     void _schedule_prompt_phase_vllm(std::vector<SequenceGroup::Ptr>& sequence_groups,
                                      Output& scheduler_output,
-                                     std::map<CacheType, std::map<size_t, std::list<size_t>>>& typed_block_copy_map,
+                                     TypedBlockCopyMap& typed_block_copy_map,
                                      LinearAttentionReservationTransaction& linear_attention_reservations) {
         // Current scheduling method schedules prompts only in a manner similar to vLLM:
         // - Limits max batch size by:
@@ -1242,11 +1245,11 @@ private:
         scheduler_output.set_linear_attention_paging_data(seq_id, std::move(paging_data));
     }
 
-    using TypedBlockCopyMap = std::map<CacheType, std::map<size_t, std::list<size_t>>>;
     static void _accumulate_block_copies(TypedBlockCopyMap& accumulated, TypedBlockCopyMap copies) {
         for (auto& [type, copy_map] : copies) {
+            auto& accumulated_copy_map = accumulated[type];
             for (auto& [source, destinations] : copy_map) {
-                auto& target = accumulated[type][source];
+                auto& target = accumulated_copy_map[source];
                 target.splice(target.end(), destinations);
             }
         }

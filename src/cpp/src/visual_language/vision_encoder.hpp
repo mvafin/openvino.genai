@@ -9,6 +9,7 @@
 #include "visual_language/vlm_config.hpp"
 #include "visual_language/processor_config.hpp"
 #include "visual_language/video_processor_config.hpp"
+#include "visual_language/vlm_models.hpp"
 #include "circular_buffer_queue.hpp"
 #include "openvino/genai/visual_language/video_metadata.hpp"
 
@@ -132,6 +133,9 @@ public:
         const std::string& device,
         const ov::AnyMap properties = {});
 
+    /// @brief Constructs the encoder from in-memory models and configs.
+    static VisionEncoder::Ptr create(const VLMModels& models, const std::string& device, const ov::AnyMap& properties);
+
     /// @brief Compute embeddings of an image given
     /// ProcessorConfig members.
     /// @param image An image to infer embeddings for. Image shape must be
@@ -173,12 +177,10 @@ protected:
     struct ConfigOnlyTag {};
     VisionEncoder(const std::filesystem::path& config_dir, ConfigOnlyTag);
     VisionEncoder(const ModelsMap& models_map, const std::filesystem::path& config_dir, ConfigOnlyTag);
+    VisionEncoder(const VLMModels& models, ConfigOnlyTag);
 
 public:
-    VisionEncoder(const std::shared_ptr<ov::Model>& model,
-                  const ProcessorConfig& processor,
-                  const std::string& device,
-                  const ov::AnyMap& properties);
+    VisionEncoder(const VLMModels& models, const std::string& device, const ov::AnyMap& properties);
 
     VisionEncoder(
         const std::filesystem::path& model_dir,

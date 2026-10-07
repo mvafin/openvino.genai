@@ -35,20 +35,12 @@ namespace {
 std::shared_ptr<InputsEmbedder> create_gguf_inputs_embedder(const GGUFMultimodalModels& models,
                                                             const std::string& device,
                                                             const ov::AnyMap& properties) {
-    auto vision = create_gguf_vision_encoder(models, device, properties);
-    auto embeddings = std::make_shared<EmbeddingsModel>(models.text_embeddings, device, properties);
-    auto embedder = std::make_shared<InputsEmbedder>(models.config,
-                                                     models.tokenizer,
-                                                     vision,
-                                                     embeddings,
-                                                     device,
-                                                     models.per_layer_embeddings,
-                                                     properties);
+    auto embedder = std::make_shared<InputsEmbedder>(models.vlm, models.tokenizer, device, properties);
     attach_gguf_audio_encoder(*embedder, models, device, properties);
     return embedder;
 }
 
-GenerationConfig gguf_generation_config(GGUFMultimodalModels& models) {
+GenerationConfig gguf_generation_config(const GGUFMultimodalModels& models) {
     GenerationConfig config;
     config.set_eos_token_id(models.tokenizer.get_eos_token_id());
     config.stop_token_ids.insert(models.stop_token_ids.begin(), models.stop_token_ids.end());
@@ -274,21 +266,24 @@ private:
     }
 public:
 #ifdef ENABLE_GGUF
-    VLMPipelineImpl(GGUFMultimodalModels models, const std::string& device, const ov::AnyMap& properties)
-        : m_vlm_config(models.config) {
-        m_inputs_embedder = create_gguf_inputs_embedder(models, device, properties);
-        m_generation_config = gguf_generation_config(models);
+    VLMPipelineImpl(const GGUFMultimodalModels& models,
+                    std::shared_ptr<InputsEmbedder> embedder,
+                    const GenerationConfig& generation_config,
+                    const std::string& device,
+                    const ov::AnyMap& properties)
+        : m_generation_config(generation_config),
+          m_vlm_config(models.vlm.config) {
+        m_inputs_embedder = std::move(embedder);
         const auto kv_pos = utils::get_kv_axes_pos(models.language);
         compile_language_model(models.language, device, properties);
         finalize_initialization(models.language, kv_pos);
     }
 
-    // Convert a language .gguf plus its mmproj into an impl. Kept out of VLMPipeline's
-    // constructor so the shared path there has a single entry.
     static std::shared_ptr<VLMBackend> create_gguf(const std::filesystem::path& models_dir,
                                                    const std::string& device,
                                                    ov::AnyMap properties,
-                                                   bool requires_paged_attention) {
+                                                   const ov::AnyMap& user_properties,
+                                                   const std::string& attention_backend) {
         OPENVINO_ASSERT(device == "CPU", "GGUF multimodal generation is currently qualified on CPU only");
         const auto it = properties.find(mmproj_path.name());
         OPENVINO_ASSERT(it != properties.end(), "A language GGUF requires mmproj_path for VLMPipeline");
@@ -303,27 +298,40 @@ public:
         utils::extract_extensions_to_core(properties);
         auto models = read_gguf_multimodal(models_dir, projector, properties);
         if (gguf_properties.enable_save_ov_model) {
-            utils::save_openvino_model(models.language, models_dir.string() + ".vlm.xml", false);
-            utils::save_openvino_model(models.text_embeddings, models_dir.string() + ".embeddings.xml", false);
-            utils::save_openvino_model(models.vision, projector + ".vision.xml", false);
+            utils::save_openvino_model(models.language, models_dir.string() + ".language.xml", false);
+            for (const auto& [name, model] : models.vlm.models)
+                utils::save_openvino_model(model, projector + "." + name + ".xml", false);
             if (models.audio)
                 utils::save_openvino_model(models.audio, projector + ".audio.xml", false);
         }
-        if (requires_paged_attention) {
-            auto [plugin_properties, scheduler] =
-                utils::extract_scheduler_config(properties, utils::get_latency_oriented_scheduler_config());
-            auto embedder = create_gguf_inputs_embedder(models, device, plugin_properties);
-            auto generation_config = gguf_generation_config(models);
-            return std::make_shared<VLMContinuousBatchingAdapter>(models.language,
+        const auto scheduled =
+            utils::extract_scheduler_config(properties, utils::get_latency_oriented_scheduler_config());
+        const auto& plugin_properties = scheduled.first;
+        const auto generation_config = gguf_generation_config(models);
+        auto embedder = create_gguf_inputs_embedder(models, device, plugin_properties);
+        const auto paged = [&](const std::shared_ptr<ov::Model>& language) {
+            return std::make_shared<VLMContinuousBatchingAdapter>(language,
                                                                   embedder,
                                                                   models.tokenizer,
-                                                                  models.config,
-                                                                  scheduler,
+                                                                  models.vlm.config,
+                                                                  scheduled.second,
                                                                   device,
                                                                   plugin_properties,
                                                                   generation_config);
+        };
+        if (utils::explicitly_requires_paged_attention(user_properties))
+            return paged(models.language);
+#if defined(OPENVINO_ARCH_X86_64) || defined(OPENVINO_ARCH_ARM64)
+        if (attention_backend == PA_BACKEND) {
+            // The paged attention conversion rewrites its model.
+            try {
+                return paged(models.language->clone());
+            } catch (const ov::Exception& exception) {
+                utils::log_paged_attention_fallback(exception);
+            }
         }
-        return std::make_shared<VLMPipelineImpl>(std::move(models), device, properties);
+#endif
+        return std::make_shared<VLMPipelineImpl>(models, embedder, generation_config, device, plugin_properties);
     }
 #endif
 
@@ -1083,10 +1091,8 @@ VLMPipeline::VLMPipeline(
     auto [properties, attention_backend] = utils::extract_attention_backend(user_properties);
     if (is_gguf_model(models_dir)) {
 #ifdef ENABLE_GGUF
-        m_pimpl = VLMPipelineImpl::create_gguf(models_dir,
-                                               device,
-                                               std::move(properties),
-                                               utils::explicitly_requires_paged_attention(user_properties));
+        m_pimpl =
+            VLMPipelineImpl::create_gguf(models_dir, device, std::move(properties), user_properties, attention_backend);
         utils::log_attention_backend(m_pimpl->get_attention_backend());
         m_pimpl->set_load_time(
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time)

@@ -323,19 +323,14 @@ void InputsEmbedderGemma4::create_per_layer_embeddings_requests(ov::CompiledMode
         });
 }
 
-InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& config,
+InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMModels& models,
                                            const Tokenizer& tokenizer,
-                                           const VisionEncoder::Ptr& vision,
-                                           const EmbeddingsModel::Ptr& embeddings,
                                            const std::string& device,
-                                           const std::shared_ptr<ov::Model>& per_layer_embeddings,
                                            const ov::AnyMap& properties)
-    : IInputsEmbedder(config, tokenizer, vision, embeddings, device),
-      m_pad_media_per_layer_inputs(true) {
-    patch_chat_template();
-    if (per_layer_embeddings) {
+    : IInputsEmbedder(models, tokenizer, device, properties) {
+    if (has_per_layer_embeddings()) {
         create_per_layer_embeddings_requests(utils::singleton_core().compile_model(
-            per_layer_embeddings,
+            models.at("text_embeddings_per_layer"),
             device,
             utils::get_model_properties(properties, "text_embeddings_per_layer", device)));
     }
@@ -347,7 +342,6 @@ InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& vlm_config,
                                            const std::string& device,
                                            const ov::AnyMap device_config)
     : IInputsEmbedder(vlm_config, model_dir, tokenizer, device, device_config) {
-    patch_chat_template();
 
     // per-layer embeddings model is optional, large MOE models don't have it
     if (!has_per_layer_embeddings()) {
@@ -369,7 +363,6 @@ InputsEmbedderGemma4::InputsEmbedderGemma4(const VLMConfig& vlm_config,
                                            const std::string& device,
                                            const ov::AnyMap device_config)
     : IInputsEmbedder(vlm_config, models_map, tokenizer, config_dir_path, device, device_config) {
-    patch_chat_template();
 
     // per-layer embeddings model is optional, large MOE models don't have it
     if (!has_per_layer_embeddings()) {
@@ -603,20 +596,11 @@ void InputsEmbedderGemma4::expand_video_tags_in_prompt(std::string& unified_prom
 }
 
 ov::Tensor InputsEmbedderGemma4::get_per_layer_embeddings(const ov::Tensor& input_ids) {
-    OPENVINO_ASSERT(m_per_layer_embeddings_requests, "Per-layer text embeddings model is not available");
-    ov::Tensor ids = input_ids;
-    if (m_pad_media_per_layer_inputs) {
-        ids = ov::Tensor(input_ids.get_element_type(), input_ids.get_shape());
-        input_ids.copy_to(ids);
-        auto* data = ids.data<int64_t>();
-        for (size_t i = 0; i < ids.get_size(); ++i) {
-            if (data[i] == m_image_token_id || data[i] == m_video_token_id || data[i] == m_audio_token_id)
-                data[i] = 0;
-        }
-    }
+    OPENVINO_ASSERT(m_per_layer_embeddings_requests, "Per-layer embeddings model is not loaded");
+
     CircularBufferQueueElementGuard<ov::InferRequest> guard(m_per_layer_embeddings_requests.get());
     ov::InferRequest& req = guard.get();
-    req.set_tensor("input_ids", ids);
+    req.set_tensor("input_ids", input_ids);
     req.infer();
 
     const ov::Tensor& output = req.get_output_tensor();
@@ -779,14 +763,6 @@ void InputsEmbedderGemma4::encode_vision_token_ids() {
 
 const std::unordered_map<std::string, ov::Tensor>& InputsEmbedderGemma4::get_lm_extra_inputs() const {
     return m_lm_extra_inputs;
-}
-
-void InputsEmbedderGemma4::patch_chat_template() {
-    // minja does not support Python-style implicit concatenation of adjacent multiline string literals:
-    //     "first "
-    //     "second"
-    // Normalize the pair to "first second" before parsing.
-    utils::patch_chat_template_multiline_strings(m_tokenizer);
 }
 
 }  // namespace ov::genai

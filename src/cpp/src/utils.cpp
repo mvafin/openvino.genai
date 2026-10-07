@@ -1345,10 +1345,6 @@ std::string replace_is_undefined_tests(const std::string& chat_template) {
     return std::regex_replace(chat_template, var_is_undefined_pattern, "not $1 is defined");
 }
 
-void patch_chat_template_multiline_strings(Tokenizer& tokenizer) {
-    tokenizer.set_chat_template(join_multiline_string_literals(tokenizer.get_chat_template()));
-}
-
 }  // namespace utils
 }  // namespace genai
 }  // namespace ov

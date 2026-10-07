@@ -208,23 +208,6 @@ void fill_video_metadata(ov::genai::VideoMetadata& metadata,
 
 namespace ov::genai {
 
-VisionEncoderMuseGlimmer::VisionEncoderMuseGlimmer(const std::shared_ptr<ov::Model>& model,
-                                                   const ProcessorConfig& config,
-                                                   const std::string& device,
-                                                   const ov::AnyMap& properties)
-    : VisionEncoder(model, config, device, properties) {
-    m_video_processor_config.fps = 2.f;
-    m_video_processor_config.num_frames = 32;
-}
-
-void VisionEncoderMuseGlimmer::set_encoder_inputs(ov::InferRequest& encoder,
-                                                  const ov::Tensor& pixel_values,
-                                                  const ov::Tensor& image_grid_thw,
-                                                  const ProcessorConfig&) {
-    encoder.set_tensor("pixel_values", pixel_values);
-    encoder.set_tensor("image_grid_thw", image_grid_thw);
-}
-
 EncodedImage VisionEncoderMuseGlimmer::encode(const ov::Tensor& image, const ov::AnyMap& config_map) {
     const ProcessorConfig config = ProcessorConfig::from_any_map(config_map, m_processor_config);
     return encode_with_config({image}, config, config.max_image_tokens);
@@ -238,17 +221,17 @@ EncodedImage VisionEncoderMuseGlimmer::encode_with_config(const std::vector<ov::
 
     MuseGlimmerVisionInputs inputs = get_vision_inputs(frames, config, max_tokens);
 
-    set_encoder_inputs(encoder, inputs.pixel_values, inputs.image_grid_thw, config);
+    encoder.set_tensor("pixel_values", inputs.pixel_values);
+    encoder.set_tensor("image_grid_thw", inputs.image_grid_thw);
     encoder.infer();
 
     const ov::Tensor& infer_output = encoder.get_output_tensor();
     const ov::Shape& infer_output_shape = infer_output.get_shape();
-    OPENVINO_ASSERT(infer_output_shape.size() == 2 || (infer_output_shape.size() == 3 && infer_output_shape[0] == 1),
-                    "Muse Glimmer vision embeddings output must be [num_patches, hidden_size] or "
-                    "[1, num_patches, hidden_size], got ",
+    OPENVINO_ASSERT(infer_output_shape.size() == 2,
+                    "Muse Glimmer vision embeddings output must have rank 2 [num_patches, hidden_size], got ",
                     infer_output_shape);
-    const size_t num_image_tokens = infer_output_shape.at(infer_output_shape.size() - 2);
-    const size_t hidden_size = infer_output_shape.back();
+    const size_t num_image_tokens = infer_output_shape.at(0);
+    const size_t hidden_size = infer_output_shape.at(1);
 
     ov::Tensor image_features(infer_output.get_element_type(), {1, num_image_tokens, hidden_size});
     std::memcpy(image_features.data(), infer_output.data(), infer_output.get_byte_size());
