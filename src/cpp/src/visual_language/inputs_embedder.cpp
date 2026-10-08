@@ -20,6 +20,7 @@
 #include "visual_language/llava_next/classes.hpp"
 #include "visual_language/llava_next_video/classes.hpp"
 #include "visual_language/minicpm/classes.hpp"
+#include "visual_language/minicpmv4_7/classes.hpp"
 #include "visual_language/muse_glimmer/classes.hpp"
 #include "visual_language/nanollava/classes.hpp"
 #include "visual_language/phi3_vision/classes.hpp"
@@ -59,6 +60,8 @@ std::shared_ptr<Base> create_inputs_embedder(VLMModelType type, Args&&... args) 
     switch (type) {
     case VLMModelType::MINICPM:
         return construct_model<Base, InputsEmbedderMiniCPM>(std::forward<Args>(args)...);
+    case VLMModelType::MINICPMV4_7:
+        return construct_model<Base, InputsEmbedderMiniCPMv4_7>(std::forward<Args>(args)...);
     case VLMModelType::LLAVA:
         return construct_model<Base, InputsEmbedderLLaVA>(std::forward<Args>(args)...);
     case VLMModelType::NANOLLAVA:
