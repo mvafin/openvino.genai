@@ -212,15 +212,24 @@ EncodedImage VisionEncoderGemma4::encode_with_config(const ov::Tensor& image, co
     // 2. Compute aspect-ratio-preserving target size
     const size_t max_unmerged_patches =
         config.max_soft_tokens * config.pooling_kernel_size * config.pooling_kernel_size;
-    const auto [target_height, target_width] = get_aspect_ratio_preserving_size(static_cast<size_t>(input_image.ny),
-                                                                                static_cast<size_t>(input_image.nx),
-                                                                                config.patch_size,
-                                                                                max_unmerged_patches,
-                                                                                config.pooling_kernel_size);
+    const auto [target_height, target_width] =
+        config.preserve_native_resolution ? bounded_image_size(input_image.ny,
+                                                               input_image.nx,
+                                                               config.patch_size * config.pooling_kernel_size,
+                                                               config.min_pixels,
+                                                               config.max_pixels)
+                                          : get_aspect_ratio_preserving_size(static_cast<size_t>(input_image.ny),
+                                                                             static_cast<size_t>(input_image.nx),
+                                                                             config.patch_size,
+                                                                             max_unmerged_patches,
+                                                                             config.pooling_kernel_size);
 
     // 3. Bicubic resize
     clip_image_u8 resized_image;
-    bicubic_resize(input_image, resized_image, static_cast<int>(target_width), static_cast<int>(target_height));
+    if (config.pad_to_target)
+        resized_image = resize_and_pad_image(input_image, {int(target_width), int(target_height)});
+    else
+        bicubic_resize(input_image, resized_image, static_cast<int>(target_width), static_cast<int>(target_height));
 
     // 4. Rescale to [0,1] and convert to CHW float
     // With mean=[0,0,0] and std=[1,1,1], clip_image_preprocess produces pixel/255.0
@@ -236,6 +245,8 @@ EncodedImage VisionEncoderGemma4::encode_with_config(const ov::Tensor& image, co
     const PatchExtractionConfig patch_config = get_patch_extraction_config(config, patch_dim);
     const size_t num_patches_h = target_height / patch_config.patch_size;
     const size_t num_patches_w = target_width / patch_config.patch_size;
+    OPENVINO_ASSERT(num_patches_h * num_patches_w <= patch_config.max_patches,
+                    "Resized image exceeds the configured patch budget");
 
     ov::Tensor pixel_values(ov::element::f32, {1, patch_config.max_patches, patch_config.patch_dim});
     float* pv_data = pixel_values.data<float>();

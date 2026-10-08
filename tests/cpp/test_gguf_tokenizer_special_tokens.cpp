@@ -11,7 +11,11 @@
 #include "openvino/op/gather.hpp"
 #include "openvino/op/parameter.hpp"
 #include "openvino/op/reshape.hpp"
+#include "visual_language/clip.hpp"
+#include "visual_language/embedding_model.hpp"
+#include "visual_language/gemma3/classes.hpp"
 #include "visual_language/gemma4/classes.hpp"
+#include "visual_language/muse_glimmer/classes.hpp"
 #include "visual_language/vlm_chat_context.hpp"
 #include "visual_language/vlm_utils.hpp"
 
@@ -291,4 +295,112 @@ TEST(GGUFMultimodal, ModernAudioHistorySwitchEditAndRollback) {
     edited.process({}, {}, {}, {audio(17.f)});
     edited.rollback();
     EXPECT_TRUE(ChatHistoryInternalState::get_or_create(first, registry)->get_messages_metadata().empty());
+}
+
+TEST(GGUFMultimodal, ReusingTextEmbeddingsDoesNotAccumulateScaling) {
+    using namespace ov::genai;
+    auto model = gemma4_models().at("text_embeddings");
+    const auto original_output = model->output().get_node_shared_ptr();
+    ov::Tensor ids(ov::element::i64, {1, 1});
+    ids.data<int64_t>()[0] = 0;
+    for (float scale : {2.f, 3.f}) {
+        EmbeddingsModel embeddings(model, scale, "CPU", {});
+        CircularBufferQueueElementGuard<EmbeddingsRequest> guard(embeddings.get_request_queue().get());
+        auto& request = guard.get();
+        const auto output = embeddings.infer(request, ids);
+        EXPECT_FLOAT_EQ(output.data<float>()[0], .25f * scale);
+        EXPECT_EQ(model->output().get_node_shared_ptr(), original_output);
+    }
+}
+
+TEST(GGUFMultimodal, Gemma3PositionOffsetAppliesDuringPrefillAndDecode) {
+    using namespace ov::genai;
+    Tokenizer tokenizer(sentencepiece_config());
+    auto models = gemma4_models();
+    models.config.model_type = VLMModelType::GEMMA3;
+    models.config.image_soft_token = "<pad>";
+    for (size_t offset : {0u, 1u}) {
+        models.config.position_ids_offset = offset;
+        InputsEmbedderGemma3 embedder(models, tokenizer, "CPU", {});
+        const auto prefill = embedder.get_position_ids(3, 0).first;
+        const auto decode = embedder.get_generation_phase_position_ids(1, 3, 0).first;
+        EXPECT_EQ(prefill.data<int64_t>()[0], offset);
+        EXPECT_EQ(prefill.data<int64_t>()[2], 2 + offset);
+        EXPECT_EQ(decode.data<int64_t>()[0], 3 + offset);
+    }
+}
+
+TEST(GGUFMultimodal, BoundedResizeKeepsNativeAreaBetweenTokenLimits) {
+    EXPECT_EQ(bounded_image_size(488, 640, 48, 70 * 48 * 48, 1120 * 48 * 48), (std::pair<size_t, size_t>{480, 624}));
+    const auto small = bounded_image_size(1, 100, 48, 70 * 48 * 48, 1120 * 48 * 48);
+    EXPECT_GT(small.first, 0);
+    EXPECT_GT(small.second, 0);
+    EXPECT_EQ(small.first % 48, 0);
+    EXPECT_EQ(small.second % 48, 0);
+    EXPECT_ANY_THROW(bounded_image_size(0, 100, 48, 1, 100));
+}
+
+TEST(GGUFMultimodal, Gemma3ImageSeparatorFollowsModelConfig) {
+    using namespace ov::genai;
+    Tokenizer tokenizer(sentencepiece_config());
+    auto models = gemma4_models();
+    models.config.model_type = VLMModelType::GEMMA3;
+    models.config.image_soft_token = "<pad>";
+    EncodedImage image{ov::Tensor(ov::element::f32, {1, 2, 4})};
+    for (const std::string separator : {std::string{}, std::string{"\n\n"}}) {
+        models.config.image_separator = separator;
+        InputsEmbedderGemma3 embedder(models, tokenizer, "CPU", {});
+        const auto prompt = embedder.normalize_prompt("<ov_genai_image_0>a", 0, {image});
+        EXPECT_EQ(prompt.unified_prompt, separator + "<start_of_image><pad><pad><end_of_image>" + separator + "a");
+    }
+}
+
+TEST(GGUFMultimodal, MuseVideoKeepsFramesWhenSamplingIsDisabled) {
+    using namespace ov::genai;
+    auto models = gemma4_models();
+    models.config.model_type = VLMModelType::MUSE_GLIMMER;
+    models.processor_config.patch_size = 2;
+    models.processor_config.merge_size = 2;
+    models.processor_config.temporal_patch_size = 1;
+    models.video_processor_config.patch_size = 2;
+    models.video_processor_config.merge_size = 2;
+    models.video_processor_config.temporal_patch_size = 1;
+    models.video_processor_config.do_sample_frames = false;
+    auto pixels = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{-1, 12});
+    pixels->output(0).set_names({"pixel_values"});
+    auto grid = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{1, 3});
+    grid->output(0).set_names({"image_grid_thw"});
+    models.models["vision_embeddings"] =
+        std::make_shared<ov::Model>(ov::OutputVector{pixels}, ov::ParameterVector{pixels, grid});
+    InputsEmbedderMuseGlimmer embedder(models, Tokenizer(sentencepiece_config()), "CPU", {});
+    ov::Tensor video(ov::element::u8, {3, 4, 4, 3});
+    std::memset(video.data(), 0, video.get_byte_size());
+    VideoMetadata metadata;
+    metadata.fps = 2.f;
+    const auto encoded = embedder.encode_videos({video}, {metadata});
+    ASSERT_EQ(encoded.size(), 1);
+    EXPECT_EQ(encoded[0].frame_num, 3);
+    EXPECT_EQ(encoded[0].metadata.frames_indices, (std::vector<size_t>{0, 1, 2}));
+    EXPECT_FLOAT_EQ(encoded[0].metadata.fps, 2.f);
+    const auto assumed_fps = embedder.encode_videos({video});
+    EXPECT_EQ(assumed_fps[0].frame_num, 3);
+    EXPECT_GT(assumed_fps[0].metadata.fps, 0.f);
+}
+
+TEST(GGUFMultimodal, ImageOnlyProcessorConfigIsLoadedForBothModalities) {
+    using namespace ov::genai;
+    struct ConfigEncoder : VisionEncoder {
+        explicit ConfigEncoder(const std::filesystem::path& path) : VisionEncoder(path, ConfigOnlyTag{}) {}
+        EncodedImage encode(const ov::Tensor&, const ov::AnyMap&) override {
+            return {};
+        }
+    };
+    ConfigEncoder encoder(std::filesystem::path(__FILE__).parent_path() / "data" / "image_only_processor");
+    const auto image = encoder.get_processor_config();
+    const auto video = encoder.get_video_processor_config();
+    EXPECT_EQ(image.size_height, 32);
+    EXPECT_EQ(image.size_width, 48);
+    EXPECT_EQ(video.size_height, image.size_height);
+    EXPECT_EQ(video.size_width, image.size_width);
+    EXPECT_EQ(video.patch_size, image.patch_size);
 }

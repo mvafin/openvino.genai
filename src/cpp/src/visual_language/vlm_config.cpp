@@ -97,6 +97,9 @@ VLMConfig::VLMConfig(const nlohmann::json& parsed) {
         read_json_param(parsed, "text_config.use_bidirectional_attention", use_bidirectional_attention);
     }
 
+    read_json_param(parsed, "position_ids_offset", position_ids_offset);
+    read_json_param(parsed, "image_separator", image_separator);
+
     // DeepSeek-OCR-2
     read_json_param(parsed, "view_separator", view_separator);
     read_json_param(parsed, "image_token_id", image_token_id);

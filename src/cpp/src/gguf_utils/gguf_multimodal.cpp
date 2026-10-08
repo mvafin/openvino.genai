@@ -48,11 +48,10 @@ struct Configs {
     json config, image, video;
 };
 
-// GGUF stores only the encoder geometry; other settings are the HF processor defaults.
-Configs hf_configs(const std::string& architecture,
-                   const std::string& projector,
-                   const MmprojMetadata& meta,
-                   const GGUFMultimodalModels& models) {
+Configs gguf_configs(const std::string& architecture,
+                     const std::string& projector,
+                     const MmprojMetadata& meta,
+                     const GGUFMultimodalModels& models) {
     Configs c;
     const auto patch = meta.integer("clip.vision.patch_size");
     c.config["hidden_size"] = models.language->input("inputs_embeds").get_partial_shape()[2].get_length();
@@ -63,6 +62,9 @@ Configs hf_configs(const std::string& architecture,
     if (architecture == "gemma3") {
         const auto size = meta.integer("clip.vision.image_size");
         c.config["model_type"] = "gemma3";
+        c.config["position_ids_offset"] = 0;
+        c.config["image_separator"] = "";
+        c.image["pad_to_target"] = true;
         c.image["size"] = {{"height", size}, {"width", size}};
         c.video = c.image;
         return c;
@@ -79,39 +81,40 @@ Configs hf_configs(const std::string& architecture,
             }))
             c.config["text_config"]["use_bidirectional_attention"] = "vision";
         c.image["pooling_kernel_size"] = meta.integer("clip.vision.projector.scale_factor", 3);
-        c.image["max_soft_tokens"] = unified ? 70 : 280;
+        const auto merged_patch = patch * c.image["pooling_kernel_size"].get<size_t>();
+        c.image["preserve_native_resolution"] = true;
+        c.image["pad_to_target"] = true;
+        c.image["min_pixels"] = 70 * merged_patch * merged_patch;
+        c.image["max_pixels"] = 1120 * merged_patch * merged_patch;
+        c.image["max_soft_tokens"] = 1120;
         c.video = c.image;
-        c.video["max_soft_tokens"] = 70;
-        c.video["num_frames"] = 32;
-        c.video["do_sample_frames"] = true;
+        c.video["do_sample_frames"] = false;
         return c;
     }
     const auto merge = meta.integer("vision.merge");
     c.image["merge_size"] = merge;
     if (architecture == "muse-glimmer") {
         c.config["model_type"] = "muse_glimmer";
+        c.image["preserve_native_resolution"] = true;
         // GGUF collapses HF's two-frame patch kernel.
         c.image["temporal_patch_size"] = 1;
         c.image["max_image_tokens"] = 4096;
         c.video = c.image;
-        c.video["fps"] = 2.f;
-        c.video["num_frames"] = 96;
-        c.video["max_video_frame_tokens"] = 144;
-        c.video["do_sample_frames"] = true;
+        c.video["max_video_frame_tokens"] = 4096;
+        c.video["do_sample_frames"] = false;
         return c;
     }
     c.config["model_type"] = architecture == "qwen35moe" ? "qwen3_5_moe" : "qwen3_5";
     const auto side = meta.integer("clip.vision.image_size") / patch;
     c.config["vision_config"]["num_position_embeddings"] = side * side;
     c.image["temporal_patch_size"] = 2;
-    c.image["size"] = {{"shortest_edge", meta.integer("clip.vision.image_min_pixels", 65536)},
-                       {"longest_edge", meta.integer("clip.vision.image_max_pixels", 16777216)}};
+    const auto merged_patch = patch * merge;
+    c.image["preserve_native_resolution"] = true;
+    c.image["pad_to_target"] = true;
+    c.image["min_pixels"] = 8 * merged_patch * merged_patch;
+    c.image["max_pixels"] = 4096 * merged_patch * merged_patch;
     c.video = c.image;
-    c.video["size"] = {{"shortest_edge", 4096}, {"longest_edge", 25165824}};
-    c.video["fps"] = 2.f;
-    c.video["min_frames"] = 4;
-    c.video["max_frames"] = 768;
-    c.video["do_sample_frames"] = true;
+    c.video["do_sample_frames"] = false;
     return c;
 }
 }  // namespace
@@ -152,7 +155,7 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     if (const auto& per_layer = genai->get_per_layer_embedding_model())
         vlm.models["text_embeddings_per_layer"] = per_layer;
 
-    const auto configs = hf_configs(architecture, projector, meta, result);
+    const auto configs = gguf_configs(architecture, projector, meta, result);
     vlm.config = VLMConfig(configs.config);
     vlm.processor_config = ProcessorConfig(configs.image);
     vlm.video_processor_config = VideoProcessorConfig(configs.video);

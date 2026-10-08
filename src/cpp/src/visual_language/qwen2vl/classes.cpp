@@ -688,7 +688,7 @@ VisionEncoderQwen2VL::VisionEncoderQwen2VL(const VLMModels& models,
                                            const std::string& device,
                                            const ov::AnyMap& properties)
     : VisionEncoder(models, ConfigOnlyTag{}),
-      use_ov_vision_preprocess(check_vision_preprocess_env()) {
+      use_ov_vision_preprocess(!models.processor_config.preserve_native_resolution && check_vision_preprocess_env()) {
     m_ireq_queue_vision_encoder = create_vision_encoder_ireq(
         models.at("vision_embeddings"), m_processor_config, device, properties, use_ov_vision_preprocess);
 }
@@ -723,11 +723,17 @@ void VisionEncoderQwen2VL::encode_with_imagepreprocess_cpp(const std::vector<ov:
         OPENVINO_ASSERT(config.temporal_patch_size == images.size(), "temporal_patch_size != images.size()");
 
     ov::Shape orig_shape = images[0].get_shape();
-    ImageSize target_image_size = qwen2_vl_utils::smart_resize(orig_shape.at(1),
-                                                               orig_shape.at(2),
-                                                               config.patch_size * config.merge_size,
-                                                               config.min_pixels,
-                                                               config.max_pixels);
+    const auto resize = config.preserve_native_resolution
+        ? [](size_t h, size_t w, size_t f, size_t min, size_t max) {
+              const auto size = bounded_image_size(h, w, f, min, max);
+              return ImageSize{size.first, size.second};
+          }
+        : qwen2_vl_utils::smart_resize;
+    ImageSize target_image_size = resize(orig_shape.at(1),
+                                         orig_shape.at(2),
+                                         config.patch_size * config.merge_size,
+                                         config.min_pixels,
+                                         config.max_pixels);
 
     ov::Tensor tiled_patches(ov::element::f32,
                              {config.temporal_patch_size, 3, target_image_size.height, target_image_size.width});
@@ -737,7 +743,11 @@ void VisionEncoderQwen2VL::encode_with_imagepreprocess_cpp(const std::vector<ov:
 
         clip_image_u8 input_image = tensor_to_clip_image_u8(image);
         clip_image_u8 resized_image;
-        bicubic_resize(input_image, resized_image, target_image_size.width, target_image_size.height);
+        if (config.pad_to_target)
+            resized_image =
+                resize_and_pad_image(input_image, {int(target_image_size.width), int(target_image_size.height)});
+        else
+            bicubic_resize(input_image, resized_image, target_image_size.width, target_image_size.height);
 
         clip_ctx ctx;
         std::copy(config.image_mean.begin(), config.image_mean.end(), ctx.image_mean);
@@ -809,13 +819,17 @@ void VisionEncoderQwen2VL::encode_with_imagepreprocess_ov(const std::vector<ov::
     auto original_height = image_shape.at(1);
     auto original_width = image_shape.at(2);
 
-    ImageSize target_image_size = qwen2_vl_utils::smart_resize(
-        original_height, 
-        original_width, 
-        config.patch_size * config.merge_size,
-        config.min_pixels,
-        config.max_pixels
-    );
+    const auto resize = config.preserve_native_resolution
+        ? [](size_t h, size_t w, size_t f, size_t min, size_t max) {
+              const auto size = bounded_image_size(h, w, f, min, max);
+              return ImageSize{size.first, size.second};
+          }
+        : qwen2_vl_utils::smart_resize;
+    ImageSize target_image_size = resize(original_height,
+                                         original_width,
+                                         config.patch_size * config.merge_size,
+                                         config.min_pixels,
+                                         config.max_pixels);
 
     // The default value of temporal_patch_size for original QWen2-VL and QWen2.5-VL is 2.
     // In this model, Only 2 frames are processed at a time, so the following check is required.

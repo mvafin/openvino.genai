@@ -1,7 +1,7 @@
 # Copyright (C) 2023-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""GGUF multimodal acceptance against the optimum-intel export of the same checkpoint.
+"""Diagnostic GGUF multimodal comparison against the optimum-intel export of the same checkpoint.
 
 The GGUF path loads its models in the export's layout, so GenAI preprocesses media identically and
 greedy tokens should match. Export with `optimum-cli export openvino --task image-text-to-text`,

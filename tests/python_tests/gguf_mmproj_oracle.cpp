@@ -16,7 +16,15 @@
 #include "mtmd-helper.h"
 #include "mtmd.h"
 
+#ifndef LLAMA_REFERENCE_REVISION
+#    define LLAMA_REFERENCE_REVISION "unknown"
+#endif
+
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--revision") {
+        std::cout << LLAMA_REFERENCE_REVISION << '\n';
+        return 0;
+    }
     if (argc < 6 || argc > 8)
         return 2;
     bool merge_frames = false;

@@ -67,10 +67,13 @@ EmbeddingsModel::EmbeddingsModel(const std::shared_ptr<ov::Model>& model,
                                  const std::string& device,
                                  const ov::AnyMap& properties) {
     // apply embedding postprocessing step by merging them into the model
-    merge_postprocess(model, scale_emb);
+    auto scaled_model = model->clone();
+    merge_postprocess(scaled_model, scale_emb);
 
-    ov::CompiledModel compiled_model = utils::singleton_core().compile_model(
-        model, device, utils::get_model_properties(properties, "text_embeddings", device));
+    ov::CompiledModel compiled_model =
+        utils::singleton_core().compile_model(scaled_model,
+                                              device,
+                                              utils::get_model_properties(properties, "text_embeddings", device));
     m_embeddings_requests_queue = init(compiled_model);
 }
 

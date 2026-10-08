@@ -1,10 +1,14 @@
 # Copyright (C) 2023-2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-"""GGUF multimodal text and audio acceptance against a pinned llama.cpp CPU oracle.
+"""GGUF multimodal acceptance against a pinned llama.cpp CPU oracle.
 
-Build gguf_mmproj_oracle.cpp against REFERENCE_REVISION. No llama.cpp production dependency.
-Images and video follow the HF processors; validate_gguf_mmproj_ir.py checks them.
+Build gguf_mmproj_oracle.cpp against REFERENCE_REVISION with LLAMA_REFERENCE_REVISION set
+to that revision. No llama.cpp production dependency.
+
+Use Q4_0 language checkpoints for quantized accuracy acceptance. Q4_K_M conversion
+has an expected accuracy loss relative to llama.cpp pending a plugin-side fix;
+runs with those checkpoints remain diagnostic and retain the same thresholds.
 """
 import argparse
 import json
@@ -50,20 +54,30 @@ def main():
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--runtime-manifest", type=Path, help="Source manifest for an immutable runtime snapshot")
     parser.add_argument("--image", type=Path)
-    parser.add_argument("--audio", type=Path, help="Also compare audio requests (16 kHz mono WAV)")
+    parser.add_argument("--video-frames", type=int, default=0, help="Also compare a short synthetic video (Qwen/Gemma)")
+    parser.add_argument("--audio", type=Path, help="Also compare audio and mixed image/audio requests (16 kHz mono WAV)")
     parser.add_argument("--api-checks", action="store_true", help="Check beam search, modern chat, streaming cancellation and reset")
-    parser.add_argument("--multi-media", action="store_true", help="Also compare two audio inputs")
+    parser.add_argument("--multi-media", action="store_true", help="Compare two images and, when available, two audio inputs")
     parser.add_argument("--audio-boundaries", action="store_true", help="Compare audio immediately before and after the 30-second chunk boundary")
-    parser.add_argument("--chat", action="store_true", help="Also compare a cached audio chat follow-up")
+    parser.add_argument("--chat", action="store_true", help="Also compare a cached image chat follow-up")
     parser.add_argument("--family", choices=("gemma3", "gemma4", "qwen35", "muse"), default="gemma3")
     parser.add_argument("--attention-backend", choices=("SDPA", "PA"), default="SDPA")
     args = parser.parse_args()
+    revision = subprocess.check_output([str(args.oracle.resolve()), "--revision"], text=True).strip()
+    if revision != REFERENCE_REVISION:
+        parser.error(f"Oracle revision {revision!r} does not match {REFERENCE_REVISION}")
+    if args.video_frames < 0:
+        parser.error("--video-frames must be nonnegative")
+    if args.video_frames and args.family not in ("gemma4", "qwen35"):
+        parser.error("Video oracle assembly is currently supported for Gemma4 and Qwen3.5")
     report = {"language": str(args.language), "mmproj": str(args.mmproj),
               "reference_revision": REFERENCE_REVISION, "family": args.family,
               "reference_language": str(args.reference_language or args.language),
               "reference_mmproj": str(args.reference_mmproj or args.mmproj),
               "reference_kind": args.reference_kind,
               "q4_k_zp_f16": os.environ.get("OV_GGUF_Q4_K_ZP_F16"),
+              "oracle_sha256": hashlib.sha256(args.oracle.read_bytes()).hexdigest(),
+              "video_frames": args.video_frames, "image": str(args.image) if args.image else None,
               "audio": str(args.audio) if args.audio else None,
               "multi_media": args.multi_media, "audio_boundaries": args.audio_boundaries,
               "attention_backend": args.attention_backend,
@@ -100,7 +114,7 @@ def save_report(args, report):
 def run(args, report):
     image_marker = {"gemma3": "<start_of_image>", "gemma4": "<|image|>", "muse": "<|image|>",
                     "qwen35": "<|vision_start|><|image_pad|><|vision_end|>"}[args.family]
-    image_prompt = image_marker + "\nDescribe the image."
+    image_prompt = "<ov_genai_image_0>\nDescribe the image."
     pipe = genai.VLMPipeline(str(args.language), "CPU", mmproj_path=str(args.mmproj),
                             ATTENTION_BACKEND=args.attention_backend,
                             INFERENCE_PRECISION_HINT="f32", DYNAMIC_QUANTIZATION_GROUP_SIZE=0,
@@ -150,16 +164,53 @@ def run(args, report):
             print(json.dumps(case), flush=True)
             return case
 
-        prompt = "What is 2 plus 2?"
-        compare([{"role": "user", "content": prompt}], *generate(prompt), "text")
+        for with_image in (False, True):
+            prompt = image_prompt if with_image else "What is 2 plus 2?"
+            kwargs = {"images": [ov.Tensor(pixels[None])]} if with_image else {}
+            compare([{"role": "user", "content": prompt.replace(image_marker, "<__media__>").replace("<ov_genai_image_0>", "<__media__>").replace("<ov_genai_image_1>", "<__media__>")}],
+                    *generate(prompt, **kwargs), "image" if with_image else "text", image if with_image else ())
+        if args.video_frames:
+            assert args.family in ("qwen35", "gemma4"), "Add the family's reference video token assembly first"
+            frames = np.stack([np.roll(pixels, i * 8, axis=1) for i in range(args.video_frames)])
+            metadata = genai.VideoMetadata()
+            metadata.fps = 2.
+            files = []
+            for i, frame in enumerate(frames):
+                file = directory / f"frame{i}.png"
+                Image.fromarray(frame).save(file)
+                files.append(str(file))
+            if args.family == "qwen35":
+                marker = "<ov_genai_video_0>"
+                reference_prompt = "".join(
+                    f"<{(i + min(i + 1, len(frames) - 1)) / 4:.1f} seconds>" +
+                    "<__media__>" * min(2, len(frames) - i) for i in range(0, len(frames), 2))
+            else:
+                marker = "<ov_genai_video_0>"
+                reference_prompt = " ".join(f"00:{i // 2:02d} <__media__>" for i in range(len(frames)))
+            compare([{"role": "user", "content": reference_prompt + "\nDescribe the video."}],
+                    *generate(marker + "\nDescribe the video.", videos=[ov.Tensor(frames)], videos_metadata=[metadata]),
+                    "video", files, merge_frames=args.family == "qwen35")
         if args.audio:
             with wave.open(str(args.audio)) as audio_file:
                 assert audio_file.getframerate() == 16000 and audio_file.getnchannels() == 1
                 assert audio_file.getsampwidth() == 2
                 waveform = np.frombuffer(audio_file.readframes(audio_file.getnframes()), dtype="<i2").astype(np.float32) / 32768
-            prompt = "<|audio|>\nTranscribe the audio."
-            compare([{"role": "user", "content": prompt.replace("<|audio|>", "<__media__>")}],
-                    *generate(prompt, audios=[ov.Tensor(waveform)]), "audio", audio)
+            for mixed in (False, True):
+                prompt = (image_marker + "\n" if mixed else "") + "<|audio|>\nTranscribe the audio."
+                kwargs = {"audios": [ov.Tensor(waveform)]}
+                if mixed:
+                    kwargs["images"] = [ov.Tensor(pixels[None])]
+                reference_prompt = prompt.replace(image_marker, "<__media__>").replace("<ov_genai_image_0>", "<__media__>").replace("<ov_genai_image_1>", "<__media__>").replace("<|audio|>", "<__media__>")
+                compare([{"role": "user", "content": reference_prompt}], *generate(prompt, **kwargs),
+                        "mixed" if mixed else "audio", (image if mixed else []) + audio)
+        if args.multi_media:
+            second_pixels = np.ascontiguousarray(pixels.transpose(1, 0, 2))
+            second_file = directory / "image2.png"
+            Image.fromarray(second_pixels).save(second_file)
+            prompt = "<ov_genai_image_0>\n<ov_genai_image_1>\nCompare these images."
+            compare([{"role": "user", "content": prompt.replace(image_marker, "<__media__>").replace("<ov_genai_image_0>", "<__media__>").replace("<ov_genai_image_1>", "<__media__>")}],
+                    *generate(prompt, images=[ov.Tensor(pixels[None]), ov.Tensor(second_pixels[None])]),
+                    "multi_image", image + [str(second_file)])
         if args.audio and (args.multi_media or args.audio_boundaries):
             def audio_file(samples, name):
                 file = directory / (name + ".wav")
@@ -182,6 +233,17 @@ def run(args, report):
                 compare([{"role": "user", "content": prompt.replace("<|audio|>", "<__media__>")}],
                         *generate(prompt, audios=[ov.Tensor(sample) for sample in samples]), name, files)
         chat_reset_matches = True
+        if args.chat:
+            pipe.start_chat()
+            first_tokens, first_text = generate(image_prompt, images=[ov.Tensor(pixels[None])])
+            chat_reset_matches = first_tokens == cases[1]["tokens"]
+            report["chat_initial_tokens"] = first_tokens
+            followup_prompt = "What is shown?"
+            compare([{"role": "user", "content": "<__media__>\nDescribe the image."},
+                     {"role": "assistant", "content": first_text},
+                     {"role": "user", "content": followup_prompt}],
+                    *generate(followup_prompt), "image_chat", image)
+            pipe.finish_chat()
         if args.audio and args.chat:
             pipe.start_chat()
             _, first_text = generate("<|audio|>\nTranscribe the audio.", audios=[ov.Tensor(waveform)])
@@ -205,22 +267,31 @@ def run(args, report):
                 save_report(args, report)
                 print(name, checks[name], flush=True)
 
-            def modern_audio_chat():
-                prompt = "<|audio|>\nTranscribe the audio."
+            audio_media = audio
+
+            def modern_chat(audio=False):
+                prompt = "<|audio|>\nTranscribe the audio." if audio else image_prompt
+                media = {"audios": [ov.Tensor(waveform)]} if audio else {"images": [ov.Tensor(pixels[None])]}
                 history = genai.ChatHistory([{"role": "user", "content": prompt}])
-                tokens, text = generate(history, audios=[ov.Tensor(waveform)])
-                reference_history = [{"role": "user", "content": "<__media__>\nTranscribe the audio."}]
-                first_case = compare(reference_history, tokens, text, "modern_audio", audio)
+                tokens, text = generate(history, **media)
+                reference_prompt = "<__media__>\nTranscribe the audio." if audio else "<__media__>\nDescribe the image."
+                reference_history = [{"role": "user", "content": reference_prompt}]
+                reference_media = audio_media if audio else image
+                first_case = compare(reference_history, tokens, text, "modern_audio" if audio else "modern_image",
+                                     reference_media)
                 # Switch to a different history with identical media-token geometry.
                 # Token IDs alone cannot distinguish the two encoders' outputs.
                 other = genai.ChatHistory([{"role": "user", "content": prompt}])
-                pipe.generate(other, max_new_tokens=1, do_sample=False,
-                              audios=[ov.Tensor(np.ascontiguousarray(waveform[::-1]))])
-                for message in ({"role": "assistant", "content": text},
-                                {"role": "user", "content": "What did the speaker say?"}):
-                    history.append(message)
-                    reference_history.append(message)
-                case = compare(reference_history, *generate(history), "modern_audio_chat", audio)
+                other_media = ({"audios": [ov.Tensor(np.ascontiguousarray(waveform[::-1]))]} if audio else
+                               {"images": [ov.Tensor((255 - pixels)[None])]})
+                pipe.generate(other, max_new_tokens=1, do_sample=False, **other_media)
+                history.append({"role": "assistant", "content": text})
+                reference_history.append({"role": "assistant", "content": text})
+                followup = "What did the speaker say?" if audio else "What is shown?"
+                history.append({"role": "user", "content": followup})
+                reference_history.append({"role": "user", "content": followup})
+                case = compare(reference_history, *generate(history),
+                               "modern_audio_chat" if audio else "modern_image_chat", reference_media)
                 assert case_passed(first_case) and case_passed(case), (first_case, case)
 
             def beam_search():
@@ -238,8 +309,10 @@ def run(args, report):
                 tokens, _ = generate("What is 2 plus 2?")
                 assert tokens == cases[0]["tokens"], tokens
 
-            if args.chat and args.audio:
-                check("modern_audio_chat", modern_audio_chat)
+            if args.chat:
+                check("modern_image_chat", modern_chat)
+                if args.audio:
+                    check("modern_audio_chat", lambda: modern_chat(True))
             check("beam_search", beam_search)
             check("cancel_and_reset", cancel_and_reset)
 
