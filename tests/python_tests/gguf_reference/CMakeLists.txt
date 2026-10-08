@@ -38,3 +38,8 @@ target_compile_features(genai-gguf-reference PRIVATE cxx_std_17)
 target_include_directories(genai-gguf-reference PRIVATE ${llama_cpp_SOURCE_DIR}/vendor)
 target_link_libraries(genai-gguf-reference PRIVATE llama)
 set_target_properties(genai-gguf-reference PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+
+add_executable(genai-gguf-quantize quantize.cpp)
+target_compile_features(genai-gguf-quantize PRIVATE cxx_std_17)
+target_link_libraries(genai-gguf-quantize PRIVATE llama)
+set_target_properties(genai-gguf-quantize PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")

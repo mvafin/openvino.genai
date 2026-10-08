@@ -25,13 +25,19 @@ int main(int argc, char** argv) {
         std::cout << LLAMA_REFERENCE_REVISION << '\n';
         return 0;
     }
-    if (argc < 6 || argc > 8)
+    if (argc < 6 || argc > 9)
         return 2;
     bool merge_frames = false;
+    bool muse_video = false;
+    bool f32_cache = false;
     std::string encoder_output;
     for (int i = 6; i < argc; ++i) {
         if (std::string(argv[i]) == "--merge-frames")
             merge_frames = true;
+        else if (std::string(argv[i]) == "--muse-video")
+            muse_video = true;
+        else if (std::string(argv[i]) == "--kv-cache-f32")
+            f32_cache = true;
         else
             encoder_output = argv[i];
     }
@@ -46,6 +52,7 @@ int main(int argc, char** argv) {
     cp.n_ctx = cp.n_batch = cp.n_ubatch = 4096;
     cp.n_threads = cp.n_threads_batch = 4;
     cp.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    cp.type_k = cp.type_v = f32_cache ? GGML_TYPE_F32 : GGML_TYPE_F16;
     auto* context = llama_init_from_model(model, cp);
     auto mmp = mtmd_context_params_default();
     mmp.use_gpu = false;
@@ -89,8 +96,45 @@ int main(int argc, char** argv) {
         }
     }
     llama_pos past = 0;
-    if (mtmd_helper_eval_chunks(multimodal, context, chunks, 0, 0, 4096, true, &past))
+    if (muse_video) {
+        const auto* vocab = llama_model_get_vocab(model);
+        const auto marker_id = [&](const std::string& marker) {
+            llama_token id;
+            if (llama_tokenize(vocab, marker.data(), marker.size(), &id, 1, false, true) != 1)
+                return llama_token(-1);
+            return id;
+        };
+        const auto image_start = marker_id("<|image_start|>");
+        const auto image_end = marker_id("<|image_end|>");
+        if (image_start < 0 || image_end < 0)
+            return 10;
+        for (size_t i = 0; i < mtmd_input_chunks_size(chunks); ++i) {
+            const auto* chunk = mtmd_input_chunks_get(chunks, i);
+            if (mtmd_input_chunk_get_type(chunk) == MTMD_INPUT_CHUNK_TYPE_TEXT) {
+                size_t count;
+                const auto* ids = mtmd_input_chunk_get_tokens_text(chunk, &count);
+                auto batch = llama_batch_init(count, 0, 1);
+                for (size_t j = 0; j < count; ++j) {
+                    if (ids[j] == image_start || ids[j] == image_end)
+                        continue;
+                    const auto n = batch.n_tokens++;
+                    batch.token[n] = ids[j];
+                    batch.pos[n] = past++;
+                    batch.n_seq_id[n] = 1;
+                    batch.seq_id[n][0] = 0;
+                    batch.logits[n] = true;
+                }
+                const auto status = batch.n_tokens ? llama_decode(context, batch) : 0;
+                llama_batch_free(batch);
+                if (status)
+                    return 7;
+            } else if (mtmd_helper_eval_chunk_single(multimodal, context, chunk, past, 0, 4096, true, &past)) {
+                return 7;
+            }
+        }
+    } else if (mtmd_helper_eval_chunks(multimodal, context, chunks, 0, 0, 4096, true, &past)) {
         return 7;
+    }
     std::ifstream history_file(argv[5]);
     std::vector<llama_token> history;
     llama_token token;

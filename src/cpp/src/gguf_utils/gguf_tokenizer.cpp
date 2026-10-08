@@ -161,9 +161,9 @@ std::string join_special_tokens(std::vector<std::string> special_tokens) {
 std::vector<std::string> get_split_regex(const std::string& pre) {
     // llama.cpp GPT4O pre-type
     static const std::string gpt4o =
-        "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+"
+        "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}])([^a-z]))*((?=[\\p{L}])([^A-Z]))+"
         "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\\r\\n\\p{L}\\p{N}]?"
-        "[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*"
+        "((?=[\\p{L}])([^a-z]))+((?=[\\p{L}])([^A-Z]))*"
         "(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\\p{N}{1,3}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|"
         "\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
     // taken from
@@ -406,15 +406,42 @@ ov::OutputVector parse_bbpe_config(const std::map<std::string, GGUFMetaData>& to
         vocab_from_config = *val;
     }
     auto vocab = parse_bbpe_vocab(vocab_from_config, byte_encode);
-    auto vocab_const = create_string_constant(vocab);
-
-    inputs.insert(inputs.end(), vocab_const.begin(), vocab_const.end());
 
     // 2. Parse merges
     std::vector<std::string> merges{};
     if (auto val = std::get_if<std::vector<std::string>>(&tokenizer_config.at("merges"))) {
         merges = *val;
     }
+
+    if (!byte_encode) {
+        // BPETokenizer's initial trie must not consume ordinary multi-character entries without merges.
+        const auto& types = std::get<ov::Tensor>(tokenizer_config.at("token_type"));
+        std::set<std::string> merged_tokens;
+        std::set<uint8_t> ordinary_bytes;
+        for (const auto& token : vocab_from_config) {
+            if (token.size() == 1)
+                ordinary_bytes.insert(static_cast<uint8_t>(token[0]));
+        }
+        for (const auto& merge : merges) {
+            const auto space = merge.find(' ', 1);
+            merged_tokens.insert(merge.substr(0, space) + merge.substr(space + 1));
+        }
+        for (size_t i = 0; i < vocab.size(); ++i) {
+            if (types.data<const int32_t>()[i] == 6) {
+                const auto byte = static_cast<uint8_t>(std::stoul(vocab_from_config[i].substr(3, 2), nullptr, 16));
+                vocab[i] = {byte};
+                if (ordinary_bytes.count(byte))
+                    vocab[i].clear();
+            } else if (types.data<const int32_t>()[i] == 1 &&
+                       vocab_from_config[i].find_first_not_of('\n') != std::string::npos &&
+                       split_utf8_chars(vocab_from_config[i]).size() > 1 &&
+                       !merged_tokens.count(vocab_from_config[i])) {
+                vocab[i].clear();
+            }
+        }
+    }
+    auto vocab_const = create_string_constant(vocab);
+    inputs.insert(inputs.end(), vocab_const.begin(), vocab_const.end());
 
     std::vector<std::vector<uint8_t>> left_merges;
     std::vector<std::vector<uint8_t>> right_merges;
@@ -423,7 +450,7 @@ ov::OutputVector parse_bbpe_config(const std::map<std::string, GGUFMetaData>& to
         return byte_encode ? apply_unicode_to_bytes(piece) : std::vector<uint8_t>(piece.begin(), piece.end());
     };
     for (const auto& merge : merges) {
-        size_t space = merge.find(' ');
+        size_t space = merge.find(' ', 1);
         std::string left = merge.substr(0, space);
         std::string right = merge.substr(space + 1);
 
@@ -1013,6 +1040,12 @@ build_tokenizer_models(const std::shared_ptr<void>& shared_object_ov_tokenizers,
         // afterwards, below).
         const bool byte_encode = (effective_model != "gemma4");
         auto vocab = parse_bbpe_vocab(tokens, byte_encode);
+        if (!byte_encode) {
+            for (size_t i = 0; i < tokens.size(); ++i) {
+                if (token_types.data<const int32_t>()[i] == 6)
+                    vocab[i] = {static_cast<uint8_t>(std::stoul(tokens[i].substr(3, 2), nullptr, 16))};
+            }
+        }
         ov::OutputVector const_vocab = create_string_constant(vocab);
         OutputVector detokenizer_outputs = {detokenizer_input};
         detokenizer_outputs.insert(detokenizer_outputs.end(), const_vocab.begin(), const_vocab.end());

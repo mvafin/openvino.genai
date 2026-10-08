@@ -128,6 +128,7 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     auto genai = std::make_shared<gguf::GenAIExtension>(gguf::GenAIExtension::InputMode::EMBEDS_TO_LOGITS);
     frontend.add_extension(genai);
     result.language = frontend.convert(frontend.load(language.string()));
+    result.language->set_rt_info(ov::element::f16, {"runtime_options", ov::hint::kv_cache_precision.name()});
     auto tokenizer_metadata = take_gguf_tokenizer_metadata(result.language);
     result.stop_token_ids = gguf_stop_token_ids(tokenizer_metadata);
     result.tokenizer = Tokenizer(GGUFTokenizerParameters(std::move(tokenizer_metadata)), properties);

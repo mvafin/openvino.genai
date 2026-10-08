@@ -3,8 +3,8 @@
 
 """Diagnostic GGUF multimodal comparison against the optimum-intel export of the same checkpoint.
 
-The GGUF path loads its models in the export's layout, so GenAI preprocesses media identically and
-greedy tokens should match. Export with `optimum-cli export openvino --task image-text-to-text`,
+The GGUF path loads its models in the export's layout while using GGUF media geometry and
+token limits. Export with `optimum-cli export openvino --task image-text-to-text`,
 including the tokenizer and the checkpoint's processor_config.json. Muse Glimmer GGUF files collapse
 the two-frame patch kernel, so its video is expected to differ.
 """

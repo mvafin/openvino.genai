@@ -9,6 +9,12 @@ to that revision. No llama.cpp production dependency.
 Use Q4_0 language checkpoints for quantized accuracy acceptance. Q4_K_M conversion
 has an expected accuracy loss relative to llama.cpp pending a plugin-side fix;
 runs with those checkpoints remain diagnostic and retain the same thresholds.
+
+Use --require-q4-0 to verify tensor types; checkpoint filenames alone do not specify
+every tensor's precision. The pinned gguf_reference genai-gguf-quantize tool can
+expand a checkpoint to F16, then quantize that expansion to a pure Q4_0 fixture.
+Record both files' hashes in --reference-manifest. Requantization creates a new
+fixture; it does not establish parity for the original mixed-weight checkpoint.
 """
 import argparse
 import json
@@ -54,7 +60,7 @@ def main():
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--runtime-manifest", type=Path, help="Source manifest for an immutable runtime snapshot")
     parser.add_argument("--image", type=Path)
-    parser.add_argument("--video-frames", type=int, default=0, help="Also compare a short synthetic video (Qwen/Gemma)")
+    parser.add_argument("--video-frames", type=int, default=0, help="Also compare a short synthetic video")
     parser.add_argument("--audio", type=Path, help="Also compare audio and mixed image/audio requests (16 kHz mono WAV)")
     parser.add_argument("--api-checks", action="store_true", help="Check beam search, modern chat, streaming cancellation and reset")
     parser.add_argument("--multi-media", action="store_true", help="Compare two images and, when available, two audio inputs")
@@ -62,14 +68,24 @@ def main():
     parser.add_argument("--chat", action="store_true", help="Also compare a cached image chat follow-up")
     parser.add_argument("--family", choices=("gemma3", "gemma4", "qwen35", "muse"), default="gemma3")
     parser.add_argument("--attention-backend", choices=("SDPA", "PA"), default="SDPA")
+    parser.add_argument("--kv-cache-precision", choices=("f16", "f32"), default="f16")
+    parser.add_argument("--require-q4-0", action="store_true",
+                        help="Reject language checkpoints containing quantized tensor types other than Q4_0")
     args = parser.parse_args()
+    language_tensor_types = None
+    if args.require_q4_0:
+        from collections import Counter
+        from gguf import GGUFReader
+        language_tensor_types = dict(Counter(t.tensor_type.name for t in GGUFReader(str(args.language)).tensors))
+        if "Q4_0" not in language_tensor_types or set(language_tensor_types) - {"F32", "F16", "Q4_0"}:
+            parser.error(f"Q4_0 accuracy acceptance requires F32/F16/Q4_0 tensors, got {language_tensor_types}")
     revision = subprocess.check_output([str(args.oracle.resolve()), "--revision"], text=True).strip()
     if revision != REFERENCE_REVISION:
         parser.error(f"Oracle revision {revision!r} does not match {REFERENCE_REVISION}")
     if args.video_frames < 0:
         parser.error("--video-frames must be nonnegative")
-    if args.video_frames and args.family not in ("gemma4", "qwen35"):
-        parser.error("Video oracle assembly is currently supported for Gemma4 and Qwen3.5")
+    if args.video_frames and args.family not in ("gemma4", "qwen35", "muse"):
+        parser.error("Video oracle assembly is currently supported for Gemma4, Qwen3.5 and Muse Glimmer")
     report = {"language": str(args.language), "mmproj": str(args.mmproj),
               "reference_revision": REFERENCE_REVISION, "family": args.family,
               "reference_language": str(args.reference_language or args.language),
@@ -81,6 +97,8 @@ def main():
               "audio": str(args.audio) if args.audio else None,
               "multi_media": args.multi_media, "audio_boundaries": args.audio_boundaries,
               "attention_backend": args.attention_backend,
+              "kv_cache_precision": args.kv_cache_precision,
+              "language_tensor_types": language_tensor_types,
               "openvino_version": ov.get_version(), "genai_version": genai.__version__,
               "validator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "cases": [], "chat_checked": args.chat, "passed": False, "completed": False}
@@ -117,7 +135,8 @@ def run(args, report):
     image_prompt = "<ov_genai_image_0>\nDescribe the image."
     pipe = genai.VLMPipeline(str(args.language), "CPU", mmproj_path=str(args.mmproj),
                             ATTENTION_BACKEND=args.attention_backend,
-                            INFERENCE_PRECISION_HINT="f32", DYNAMIC_QUANTIZATION_GROUP_SIZE=0,
+                            INFERENCE_PRECISION_HINT="f32", KV_CACHE_PRECISION=args.kv_cache_precision,
+                            DYNAMIC_QUANTIZATION_GROUP_SIZE=0,
                             INFERENCE_NUM_THREADS=4)
     tokenizer = pipe.get_tokenizer()
     if args.image:
@@ -140,16 +159,19 @@ def run(args, report):
             result = pipe.generate(prompt, max_new_tokens=20, do_sample=False, streamer=stream, **kwargs)
             return stream.tokens, result.texts[0]
 
-        def compare(messages, tokens, text, modality, media=(), merge_frames=False):
+        def compare(messages, tokens, text, modality, media=(), merge_frames=False, muse_video=False):
             """Replay `tokens` through the oracle on the same history and score the agreement."""
             # GenAI expands image markers into embeddings. mtmd uses its own marker and adds
             # the same Gemma3 begin/end-image tokens around the reference encoder output.
             (directory / "prompt.txt").write_text(
                 tokenizer.apply_chat_template(messages, add_generation_prompt=True))
             (directory / "history.txt").write_text(" ".join(map(str, tokens)))
+            oracle_options = (["--merge-frames"] if merge_frames else []) + (["--muse-video"] if muse_video else [])
+            if args.kv_cache_precision == "f32":
+                oracle_options.append("--kv-cache-f32")
             process = subprocess.run([str(args.oracle.resolve()), str((args.reference_language or args.language).resolve()),
                 str((args.reference_mmproj or args.mmproj).resolve()), ";".join(media) if media else "-",
-                str(directory / "prompt.txt"), str(directory / "history.txt")] + (["--merge-frames"] if merge_frames else []), capture_output=True, text=True)
+                str(directory / "prompt.txt"), str(directory / "history.txt")] + oracle_options, capture_output=True, text=True)
             (args.report.parent / f"{args.report.stem}-{modality}.log").write_text(process.stderr)
             process.check_returncode()
             choices = next(line for line in process.stdout.splitlines() if line.startswith("CHOICES"))
@@ -170,7 +192,6 @@ def run(args, report):
             compare([{"role": "user", "content": prompt.replace(image_marker, "<__media__>").replace("<ov_genai_image_0>", "<__media__>").replace("<ov_genai_image_1>", "<__media__>")}],
                     *generate(prompt, **kwargs), "image" if with_image else "text", image if with_image else ())
         if args.video_frames:
-            assert args.family in ("qwen35", "gemma4"), "Add the family's reference video token assembly first"
             frames = np.stack([np.roll(pixels, i * 8, axis=1) for i in range(args.video_frames)])
             metadata = genai.VideoMetadata()
             metadata.fps = 2.
@@ -184,12 +205,18 @@ def run(args, report):
                 reference_prompt = "".join(
                     f"<{(i + min(i + 1, len(frames) - 1)) / 4:.1f} seconds>" +
                     "<__media__>" * min(2, len(frames) - i) for i in range(0, len(frames), 2))
+            elif args.family == "muse":
+                marker = "<ov_genai_video_0>"
+                reference_prompt = "<|vid_start|>" + "".join(
+                    f"Time: {i / metadata.fps:.1f}s<__media__>" +
+                    ("<|vid_frame_separator|>" if i + 1 < len(frames) else "<|vid_end|>")
+                    for i in range(len(frames)))
             else:
                 marker = "<ov_genai_video_0>"
                 reference_prompt = " ".join(f"00:{i // 2:02d} <__media__>" for i in range(len(frames)))
             compare([{"role": "user", "content": reference_prompt + "\nDescribe the video."}],
                     *generate(marker + "\nDescribe the video.", videos=[ov.Tensor(frames)], videos_metadata=[metadata]),
-                    "video", files, merge_frames=args.family == "qwen35")
+                    "video", files, merge_frames=args.family == "qwen35", muse_video=args.family == "muse")
         if args.audio:
             with wave.open(str(args.audio)) as audio_file:
                 assert audio_file.getframerate() == 16000 and audio_file.getnchannels() == 1

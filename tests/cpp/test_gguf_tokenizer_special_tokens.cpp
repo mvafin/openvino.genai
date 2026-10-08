@@ -70,6 +70,30 @@ ov::genai::GGUFTokenizerParameters sentencepiece_config() {
 }
 constexpr size_t vocab_size = 272;  // tokens in sentencepiece_config()
 
+ov::genai::GGUFTokenizerParameters combining_marks_config(const std::string& pre) {
+    ov::Tensor types(ov::element::i32, {9});
+    std::fill_n(types.data<int32_t>(), 6, 1);
+    types.data<int32_t>()[6] = 2;
+    types.data<int32_t>()[7] = types.data<int32_t>()[8] = 3;
+    ov::Tensor unknown_id(ov::element::u32, {});
+    unknown_id.data<uint32_t>()[0] = 6;
+    ov::Tensor bos_id(ov::element::u32, {}), eos_id(ov::element::u32, {});
+    bos_id.data<uint32_t>()[0] = 7;
+    eos_id.data<uint32_t>()[0] = 8;
+    ov::Tensor add_bos(ov::element::boolean, {});
+    add_bos.data<bool>()[0] = false;
+    return ov::genai::GGUFTokenizerParameters(
+        {{"model", std::string("gpt2")},
+         {"pre", pre},
+         {"tokens", std::vector<std::string>{"a", "Ì", "ģ", "Ìģ", "aÌ", "aÌģ", "<unk>", "<bos>", "<eos>"}},
+         {"merges", std::vector<std::string>{"Ì ģ", "a Ì", "aÌ ģ", "a Ìģ"}},
+         {"token_type", types},
+         {"unknown_token_id", unknown_id},
+         {"bos_token_id", bos_id},
+         {"eos_token_id", eos_id},
+         {"add_bos_token", add_bos}});
+}
+
 // Text embeddings are all 0.25; the vision encoder is never run.
 ov::genai::VLMModels gemma4_models() {
     ov::genai::VLMModels models;
@@ -121,6 +145,77 @@ TEST(GGUFTokenizer, ChatTemplateSupportsUndefinedAndAdjacentStringLiterals) {
                     "{{ messages[0]['content'] }}");
     ov::genai::Tokenizer tokenizer(config);
     EXPECT_EQ(tokenizer.apply_chat_template({{{"role", "user"}, {"content", "a"}}}, false), "firstseconda");
+}
+
+TEST(GGUFTokenizer, GPT4OSplitsCombiningMarksLikeLlamaCPU) {
+    // Pinned llama.cpp 03fa73cb: "a\u0301" splits into "a" and the acute accent.
+    const std::vector<int64_t> expected{0, 3};
+    for (const auto& pre : {"gpt-4o", "llama4"}) {
+        ov::genai::Tokenizer tokenizer(combining_marks_config(pre));
+        const auto ids = tokenizer.encode("a\u0301", ov::genai::add_special_tokens(false)).input_ids;
+        ASSERT_EQ(ids.get_size(), expected.size()) << pre;
+        EXPECT_EQ(std::vector<int64_t>(ids.data<int64_t>(), ids.data<int64_t>() + ids.get_size()), expected) << pre;
+    }
+}
+
+TEST(GGUFTokenizer, Gemma4UsesMergesForOrdinaryVocabularyEntries) {
+    auto config = combining_marks_config("gemma4");
+    config.config["model"] = std::string("gemma4");
+    config.config["tokens"] =
+        std::vector<std::string>{"<unk>", "<bos>", "<eos>", "a", "b", "ab", "c", "abc", "\n", "\n\n"};
+    config.config["merges"] = std::vector<std::string>{"a b"};
+    ov::Tensor types(ov::element::i32, {10});
+    std::fill_n(types.data<int32_t>(), 10, 1);
+    types.data<int32_t>()[0] = 2;
+    types.data<int32_t>()[1] = types.data<int32_t>()[2] = 3;
+    config.config["token_type"] = types;
+    for (const auto& [key, id] : std::vector<std::pair<std::string, uint32_t>>{{"unknown_token_id", 0},
+                                                                               {"bos_token_id", 1},
+                                                                               {"eos_token_id", 2}}) {
+        ov::Tensor value(ov::element::u32, {});
+        value.data<uint32_t>()[0] = id;
+        config.config[key] = value;
+    }
+    ov::genai::Tokenizer tokenizer(config);
+    const auto ids = tokenizer.encode("abc\n\n", ov::genai::add_special_tokens(false)).input_ids;
+    // Pinned llama.cpp 03fa73cb: "abc" needs a merge; repeated newlines use their vocabulary entry.
+    const std::vector<int64_t> expected{5, 6, 9};
+    ASSERT_EQ(ids.get_size(), expected.size());
+    EXPECT_EQ(std::vector<int64_t>(ids.data<int64_t>(), ids.data<int64_t>() + ids.get_size()), expected);
+}
+
+TEST(GGUFTokenizer, Gemma4ByteTokenSpellingUsesOrdinaryCharacters) {
+    auto config = combining_marks_config("gemma4");
+    config.config["model"] = std::string("gemma4");
+    config.config["tokens"] =
+        std::vector<std::string>{"<unk>", "<bos>", "<eos>", "<", "0", "x", "8", "5", ">", "<0x85>", "\n", "<0x0A>"};
+    config.config["merges"] = std::vector<std::string>{};
+    ov::Tensor types(ov::element::i32, {12});
+    std::fill_n(types.data<int32_t>(), 12, 1);
+    types.data<int32_t>()[0] = 2;
+    types.data<int32_t>()[1] = types.data<int32_t>()[2] = 3;
+    types.data<int32_t>()[9] = 6;
+    types.data<int32_t>()[11] = 6;
+    config.config["token_type"] = types;
+    for (const auto& [key, id] : std::vector<std::pair<std::string, uint32_t>>{{"unknown_token_id", 0},
+                                                                               {"bos_token_id", 1},
+                                                                               {"eos_token_id", 2}}) {
+        ov::Tensor value(ov::element::u32, {});
+        value.data<uint32_t>()[0] = id;
+        config.config[key] = value;
+    }
+    ov::genai::Tokenizer tokenizer(config);
+    const auto ids = tokenizer.encode("<0x85>", ov::genai::add_special_tokens(false)).input_ids;
+    const std::vector<int64_t> expected{3, 4, 5, 6, 7, 8};
+    ASSERT_EQ(ids.get_size(), expected.size());
+    EXPECT_EQ(std::vector<int64_t>(ids.data<int64_t>(), ids.data<int64_t>() + ids.get_size()), expected);
+    const auto byte_ids = tokenizer.encode(std::string(1, char(0x85)), ov::genai::add_special_tokens(false)).input_ids;
+    ASSERT_EQ(byte_ids.get_size(), 1);
+    EXPECT_EQ(byte_ids.data<int64_t>()[0], 9);
+    const auto newline_ids = tokenizer.encode("\n", ov::genai::add_special_tokens(false)).input_ids;
+    ASSERT_EQ(newline_ids.get_size(), 1);
+    EXPECT_EQ(newline_ids.data<int64_t>()[0], 10);
+    EXPECT_EQ(tokenizer.decode(std::vector<int64_t>{11}), "\n");
 }
 
 TEST(GGUFMultimodal, PreformattedChatDoesNotDuplicateSpecialTokens) {
