@@ -198,6 +198,8 @@ def acceptance(family, language, mmproj, provenance, backend, image, audio, refe
         command += ["--audio", audio, "--audio-boundaries"]
     if q4:
         command += ["--require-q4-0"]
+    else:
+        command += ["--reference-kind", "represented-f32"]
     if os.environ.get("GGUF_RUNTIME_MANIFEST"):
         command += ["--runtime-manifest", os.environ["GGUF_RUNTIME_MANIFEST"]]
     execute(command, report_dir / (name + ".log"), timeout=1800)
