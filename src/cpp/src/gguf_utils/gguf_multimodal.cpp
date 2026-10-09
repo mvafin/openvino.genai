@@ -11,7 +11,6 @@
 #include "openvino/frontend/gguf/adapt_mmproj_to_genai.hpp"
 #include "openvino/frontend/gguf/extension/genai.hpp"
 #include "openvino/frontend/gguf/frontend.hpp"
-#include "openvino/frontend/gguf/genai_vision.hpp"
 
 namespace ov::genai {
 namespace {
@@ -151,7 +150,11 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
         gguf::pass::AdaptMmprojToGenAI(gguf::pass::AdaptMmprojToGenAI::Modality::AUDIO).run_on_model(result.audio);
     }
     auto& vlm = result.vlm;
-    vlm.models = gguf::genai_vision_models(combined);
+    using Adapter = gguf::pass::AdaptMmprojToGenAI;
+    Adapter vision_adapter(Adapter::Modality::VISION, Adapter::Layout::VISION_ENCODERS);
+    auto vision = combined->clone();
+    vision_adapter.run_on_model(vision);
+    vlm.models = vision_adapter.get_vision_models();
     vlm.models["text_embeddings"] = genai->get_embedding_model();
     if (const auto& per_layer = genai->get_per_layer_embedding_model())
         vlm.models["text_embeddings_per_layer"] = per_layer;
