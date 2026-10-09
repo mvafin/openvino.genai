@@ -9,6 +9,7 @@
 #include "visual_language/vlm_config.hpp"
 #include "visual_language/processor_config.hpp"
 #include "visual_language/video_processor_config.hpp"
+#include "visual_language/vlm_models.hpp"
 #include "circular_buffer_queue.hpp"
 #include "openvino/genai/visual_language/video_metadata.hpp"
 
@@ -27,6 +28,18 @@ struct ImageSize {
     size_t height = 0;
     /// @brief Width of a corresponding image.
     size_t width = 0;
+};
+
+/// @brief Slices grid layout: how a source image is adaptively split into slices (rows x cols).
+struct SlicesGrid {
+    /// @brief Number of slice rows.
+    size_t rows = 0;
+    /// @brief Number of slice columns.
+    size_t cols = 0;
+
+    bool has_slices() const {
+        return rows != 0 && cols != 0;
+    }
 };
 
 
@@ -66,6 +79,14 @@ struct EncodedImage {
     /// @brief Resampled image, used only by MiniCPM.
     ResampledImage resampled_image;
 
+    /// @brief Per-crop sizes in patches (thumbnail first, then detail slices by rows).
+    /// Used only by MiniCPM-V 4.7.
+    std::vector<ImageSize> crop_sizes;
+
+    /// @brief Slices grid layout (rows, cols), zeroed if image is not sliced.
+    /// Used only by MiniCPM-V 4.7.
+    SlicesGrid slices_grid;
+
     /// @brief Number of image tokens required to append to a normalized prompt
     size_t num_image_tokens = 0;
 };
@@ -84,6 +105,14 @@ struct EncodedVideo {
 
     /// @brief A number of encoded frames.
     size_t frame_num = 0;
+
+    /// @brief Per-crop sizes in patches of a single frame (thumbnail first, then detail slices by rows).
+    /// Each video frame has the same crop sizes layout. Used only by MiniCPM-V 4.7.
+    std::vector<ImageSize> crop_sizes;
+
+    /// @brief Slices grid layout of a single frame (rows, cols), zeroed if frame is not sliced.
+    /// Used only by MiniCPM-V 4.7.
+    SlicesGrid slices_grid;
 
     /// @brief Video metadata, used for video input processing and prompt normalization.
     VideoMetadata metadata;
@@ -132,6 +161,9 @@ public:
         const std::string& device,
         const ov::AnyMap properties = {});
 
+    /// @brief Constructs the encoder from in-memory models and configs.
+    static VisionEncoder::Ptr create(const VLMModels& models, const std::string& device, const ov::AnyMap& properties);
+
     /// @brief Compute embeddings of an image given
     /// ProcessorConfig members.
     /// @param image An image to infer embeddings for. Image shape must be
@@ -173,8 +205,11 @@ protected:
     struct ConfigOnlyTag {};
     VisionEncoder(const std::filesystem::path& config_dir, ConfigOnlyTag);
     VisionEncoder(const ModelsMap& models_map, const std::filesystem::path& config_dir, ConfigOnlyTag);
+    VisionEncoder(const VLMModels& models, ConfigOnlyTag);
 
 public:
+    VisionEncoder(const VLMModels& models, const std::string& device, const ov::AnyMap& properties);
+
     VisionEncoder(
         const std::filesystem::path& model_dir,
         const std::string& device,

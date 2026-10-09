@@ -29,6 +29,10 @@ private:
 
 class InputsEmbedderGemma4 : public InputsEmbedder::IInputsEmbedder {
 public:
+    InputsEmbedderGemma4(const VLMModels& models,
+                         const Tokenizer& tokenizer,
+                         const std::string& device,
+                         const ov::AnyMap& properties);
     InputsEmbedderGemma4(const VLMConfig& vlm_config,
                          const std::filesystem::path& model_dir,
                          const Tokenizer& tokenizer,
@@ -59,6 +63,23 @@ public:
         const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count = {}) override;
 
     std::vector<ov::genai::EncodedImage> encode_images(const std::vector<ov::Tensor>& images) override;
+    /// @brief Encode each audio independently; the result is passed back in explicitly.
+    std::vector<ov::genai::EncodedAudio> encode_audios(const std::vector<ov::Tensor>& audios) override;
+
+    /// @brief Audio-aware overload. Places each audio at its own placeholder run.
+    ov::Tensor get_inputs_embeds(const std::string& prompt,
+                                 const std::vector<ov::genai::EncodedImage>& images,
+                                 const std::vector<ov::genai::EncodedVideo>& videos,
+                                 const std::vector<ov::genai::EncodedAudio>& audios,
+                                 ov::genai::VLMPerfMetrics& metrics,
+                                 bool recalculate_merged_embeddings,
+                                 const std::vector<size_t>& image_sequence,
+                                 const std::vector<size_t>& videos_sequence,
+                                 const std::vector<size_t>& audios_sequence,
+                                 const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) override;
+    void set_audio_encoder(AudioEncode encoder) override {
+        m_audio_encoder = std::move(encoder);
+    }
 
     std::vector<ov::genai::EncodedVideo> encode_videos(const std::vector<ov::Tensor>& videos,
                                                        const std::vector<VideoMetadata>& videos_metadata = {}) override;
@@ -73,6 +94,15 @@ public:
                                       const std::vector<EncodedImage>& images,
                                       const std::vector<EncodedVideo>& videos) const override;
 
+    /// @brief Audio-aware normalization: resolves `<ov_genai_audio_N>` and expands each run.
+    NormalizedPrompt normalize_prompt(const std::string& prompt,
+                                      size_t base_image_id,
+                                      size_t base_video_id,
+                                      size_t base_audio_id,
+                                      const std::vector<EncodedImage>& images,
+                                      const std::vector<EncodedVideo>& videos,
+                                      const std::vector<ov::genai::EncodedAudio>& audios) const override;
+
     const std::unordered_map<std::string, ov::Tensor>& get_lm_extra_inputs() const override;
 
     std::function<ov::Tensor(const ov::Tensor& new_input_ids)> get_per_layer_embeddings_callback() override {
@@ -86,8 +116,11 @@ public:
     }
 
 private:
+    AudioEncode m_audio_encoder;
+    int64_t m_audio_token_id = -1;
     // Per-layer text embeddings model (Gemma4-specific)
     std::unique_ptr<CircularBufferQueue<ov::InferRequest>> m_per_layer_embeddings_requests = nullptr;
+    void create_per_layer_embeddings_requests(ov::CompiledModel compiled);
 
     // Extra inputs to pass to the language model
     std::unordered_map<std::string, ov::Tensor> m_lm_extra_inputs;
@@ -113,7 +146,6 @@ private:
 
     void encode_vision_token_ids();
 
-    void patch_chat_template();
 };
 
 }  // namespace ov::genai

@@ -61,6 +61,8 @@ ov::genai::ProcessorConfig::ProcessorConfig(const nlohmann::json& parsed) {
     // Setting gemma4 config params
     read_json_param(parsed, "pooling_kernel_size", pooling_kernel_size);
     read_json_param(parsed, "max_soft_tokens", max_soft_tokens);
+    read_json_param(parsed, "preserve_native_resolution", preserve_native_resolution);
+    read_json_param(parsed, "pad_to_target", pad_to_target);
 }
 
 ov::genai::ProcessorConfig::ProcessorConfig(const std::filesystem::path& json_path)
@@ -86,5 +88,8 @@ ov::genai::ProcessorConfig ov::genai::ProcessorConfig::from_any_map(
     read_anymap_param(config_map, "max_image_tokens", extracted_config.max_image_tokens);
     read_anymap_param(config_map, "pooling_kernel_size", extracted_config.pooling_kernel_size);
     read_anymap_param(config_map, "max_soft_tokens", extracted_config.max_soft_tokens);
+    read_anymap_param(config_map, "image_size", extracted_config.image_size);
+    read_anymap_param(config_map, "window_kernel_size", extracted_config.window_kernel_size);
+    read_anymap_param(config_map, "merge_kernel_size", extracted_config.merge_kernel_size);
     return extracted_config;
 }

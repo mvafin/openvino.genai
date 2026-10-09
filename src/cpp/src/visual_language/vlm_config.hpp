@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <map>
+#include <nlohmann/json_fwd.hpp>
 
 #include <openvino/runtime/properties.hpp>
 
@@ -34,6 +35,7 @@ enum class VLMModelType {
     QWEN3_OMNI,
     DEEPSEEK_OCR2,
     MUSE_GLIMMER,
+    MINICPMV4_7,
 };
 
 /// @brief A Configuration class passed to VLMPipeline and used to
@@ -102,6 +104,8 @@ public:
 
     /// @brief A string token denoting start of vision embeddings for gemma3-4b-it model.
     std::string start_of_image = "<start_of_image>";
+    size_t position_ids_offset = 1;
+    std::string image_separator = "\n\n";
     /// @brief A placeholder for image embeddings in text for gemma3-4b-it model.
     std::string image_soft_token = "<image_soft_token>";
     /// @brief A string token denoting end of vision embeddings for gemma3-4b-it model.
@@ -128,6 +132,14 @@ public:
 
     /// @brief A string token denoting start of video embeddings
     std::string video_start = "<video>";
+
+    // MiniCPM-V 4.7 specific config
+    /// @brief Image size for num_patches_per_side calculation in vision embeddings.
+    size_t vision_config_image_size = 980;
+    /// @brief Window kernel size for ViT window attention merge.
+    size_t vision_config_window_kernel_size = 2;
+    /// @brief Merge kernel size for downsample MLP merge.
+    size_t merge_kernel_size = 2;
 
     // Qwen3-VL specific config
     /// @brief Number of position embeddings in vision encoder for Qwen3-VL model.
@@ -174,6 +186,8 @@ public:
     /// Keys in the file must match the VLMConfig's members.
     /// @param json_path A path to a file to extract the values from.
     explicit VLMConfig(const std::filesystem::path& config_path);
+    /// @brief Construct VLMConfig from parsed config.json content.
+    explicit VLMConfig(const nlohmann::json& parsed);
     /// @brief Default copy constructor.
     /// @param A config to copy from.
     VLMConfig(const VLMConfig&) = default;

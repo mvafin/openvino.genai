@@ -521,6 +521,24 @@ ContinuousBatchingPipeline::ContinuousBatchingPipeline(
     m_impl->m_load_time_ms = get_load_time(start_time);
 }
 
+ContinuousBatchingPipeline::ContinuousBatchingPipeline(const std::shared_ptr<ov::Model>& language_model,
+                                                       const std::shared_ptr<InputsEmbedder>& embedder,
+                                                       const Tokenizer& tokenizer,
+                                                       const SchedulerConfig& scheduler_config,
+                                                       const std::string& device,
+                                                       const ov::AnyMap& properties,
+                                                       const GenerationConfig& generation_config) {
+    const auto start = std::chrono::steady_clock::now();
+    m_impl = std::make_shared<ContinuousBatchingImpl>(language_model,
+                                                      embedder,
+                                                      tokenizer,
+                                                      scheduler_config,
+                                                      device,
+                                                      properties,
+                                                      generation_config);
+    m_impl->m_load_time_ms = get_load_time(start);
+}
+
 ov::genai::Tokenizer ContinuousBatchingPipeline::get_tokenizer() const{
     return m_impl->get_tokenizer();
 }
