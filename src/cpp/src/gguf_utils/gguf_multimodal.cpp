@@ -150,7 +150,8 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
         gguf::pass::AdaptMmprojToGenAI(gguf::pass::AdaptMmprojToGenAI::Modality::AUDIO).run_on_model(result.audio);
     }
     auto& vlm = result.vlm;
-    gguf::pass::AdaptVisionEncodersToGenAI vision_adapter;
+    using Adapter = gguf::pass::AdaptMmprojToGenAI;
+    Adapter vision_adapter(Adapter::Modality::VISION, Adapter::Layout::VISION_ENCODERS);
     auto vision = combined->clone();
     vision_adapter.run_on_model(vision);
     vlm.models = vision_adapter.get_vision_models();
