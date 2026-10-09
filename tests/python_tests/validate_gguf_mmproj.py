@@ -69,6 +69,8 @@ def main():
     parser.add_argument("--family", choices=("gemma3", "gemma4", "qwen35", "muse"), default="gemma3")
     parser.add_argument("--attention-backend", choices=("SDPA", "PA"), default="SDPA")
     parser.add_argument("--kv-cache-precision", choices=("f16", "f32"), default="f16")
+    parser.add_argument("--full-coverage", action="store_true",
+                        help="Require all family modalities, chat and API acceptance cases")
     parser.add_argument("--require-q4-0", action="store_true",
                         help="Reject language checkpoints containing quantized tensor types other than Q4_0")
     args = parser.parse_args()
@@ -86,6 +88,13 @@ def main():
         parser.error("--video-frames must be nonnegative")
     if args.video_frames and args.family not in ("gemma4", "qwen35", "muse"):
         parser.error("Video oracle assembly is currently supported for Gemma4, Qwen3.5 and Muse Glimmer")
+    if args.full_coverage:
+        if not (args.multi_media and args.chat and args.api_checks):
+            parser.error("--full-coverage requires --multi-media, --chat and --api-checks")
+        if args.family != "gemma3" and not args.video_frames:
+            parser.error("--full-coverage requires --video-frames for this family")
+        if args.family == "gemma4" and not (args.audio and args.audio_boundaries):
+            parser.error("--full-coverage requires --audio and --audio-boundaries for Gemma4")
     report = {"language": str(args.language), "mmproj": str(args.mmproj),
               "reference_revision": REFERENCE_REVISION, "family": args.family,
               "reference_language": str(args.reference_language or args.language),
@@ -101,6 +110,7 @@ def main():
               "language_tensor_types": language_tensor_types,
               "openvino_version": ov.get_version(), "genai_version": genai.__version__,
               "validator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+              "full_coverage": args.full_coverage,
               "cases": [], "chat_checked": args.chat, "passed": False, "completed": False}
     if args.runtime_manifest:
         report["runtime_sources"] = json.loads(args.runtime_manifest.read_text())
@@ -109,6 +119,7 @@ def main():
     args.report.parent.mkdir(parents=True, exist_ok=True)
     try:
         run(args, report)
+        validate_coverage(args, report)
         report["completed"] = True
         report["passed"] = (report["request_reset_matches"] and report["chat_reset_matches"] and
                             all(c["passed"] for c in report.get("api_checks", {}).values()) and
@@ -121,8 +132,45 @@ def main():
     return 0 if report["passed"] else 1
 
 
+def validate_coverage(args, report):
+    expected = {"text", "image"}
+    api = set()
+    if args.video_frames:
+        expected.add("video")
+    if args.multi_media:
+        expected.add("multi_image")
+    if args.chat:
+        expected.add("image_chat")
+    if args.audio:
+        expected.update(("audio", "mixed"))
+        if args.multi_media:
+            expected.add("multi_audio")
+        if args.audio_boundaries:
+            expected.update(("audio_samples_479999", "audio_samples_480321"))
+        if args.chat:
+            expected.add("audio_chat")
+    if args.api_checks:
+        api.update(("beam_search", "cancel_and_reset"))
+        if args.chat:
+            expected.update(("modern_image", "modern_image_chat"))
+            api.add("modern_image_chat")
+            if args.audio:
+                expected.update(("modern_audio", "modern_audio_chat"))
+                api.add("modern_audio_chat")
+    modalities = [case["modality"] for case in report["cases"]]
+    if len(modalities) != len(set(modalities)) or set(modalities) != expected:
+        raise ValueError(f"Expected modalities {sorted(expected)}, got {modalities}")
+    if set(report.get("api_checks", {})) != api:
+        raise ValueError(f"Expected API checks {sorted(api)}, got {list(report.get('api_checks', {}))}")
+    report["required_modalities"] = sorted(expected)
+    report["required_api_checks"] = sorted(api)
+
+
 def case_passed(case):
-    return case["first_token_matches"] and case["matching_choice_fraction"] >= .9
+    tokens, choices = case["tokens"], case["reference_choices_on_same_history"]
+    if not tokens or len(tokens) != len(choices):
+        return False
+    return tokens[0] == choices[0] and sum(a == b for a, b in zip(tokens, choices)) / len(tokens) >= .9
 
 
 def save_report(args, report):
