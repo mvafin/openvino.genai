@@ -32,6 +32,7 @@ import openvino_genai as genai
 from PIL import Image
 
 REFERENCE_REVISION = "03fa73cb27f5c251b9528489b18d303b1366aca4"
+MUSE_CHAT_DATE = "2026-10-15"
 
 
 class Tokens(genai.StreamerBase):
@@ -107,6 +108,7 @@ def main():
               "multi_media": args.multi_media, "audio_boundaries": args.audio_boundaries,
               "attention_backend": args.attention_backend,
               "kv_cache_precision": args.kv_cache_precision,
+              "chat_template_date": MUSE_CHAT_DATE if args.family == "muse" else None,
               "language_tensor_types": language_tensor_types,
               "openvino_version": ov.get_version(), "genai_version": genai.__version__,
               "validator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -186,7 +188,13 @@ def run(args, report):
                             INFERENCE_PRECISION_HINT="f32", KV_CACHE_PRECISION=args.kv_cache_precision,
                             DYNAMIC_QUANTIZATION_GROUP_SIZE=0,
                             INFERENCE_NUM_THREADS=4)
+    if args.family == "muse":
+        pipe.set_chat_template("{%- set current_date = '" + MUSE_CHAT_DATE + "' -%}" +
+                               pipe.get_tokenizer().get_original_chat_template())
     tokenizer = pipe.get_tokenizer()
+    if args.family == "muse":
+        assert f"Current date: {MUSE_CHAT_DATE}." in tokenizer.apply_chat_template(
+            [{"role": "user", "content": "test"}], add_generation_prompt=True)
     if args.image:
         pixels = np.asarray(Image.open(args.image).convert("RGB"))
     else:
