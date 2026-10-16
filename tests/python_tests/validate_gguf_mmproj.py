@@ -188,11 +188,10 @@ def run(args, report):
                             INFERENCE_PRECISION_HINT="f32", KV_CACHE_PRECISION=args.kv_cache_precision,
                             DYNAMIC_QUANTIZATION_GROUP_SIZE=0,
                             INFERENCE_NUM_THREADS=4)
-    if args.family == "muse":
-        pipe.set_chat_template("{%- set current_date = '" + MUSE_CHAT_DATE + "' -%}" +
-                               pipe.get_tokenizer().get_original_chat_template())
     tokenizer = pipe.get_tokenizer()
     if args.family == "muse":
+        tokenizer.set_chat_template("{%- set current_date = '" + MUSE_CHAT_DATE + "' -%}" +
+                                    tokenizer.get_original_chat_template())
         assert f"Current date: {MUSE_CHAT_DATE}." in tokenizer.apply_chat_template(
             [{"role": "user", "content": "test"}], add_generation_prompt=True)
     if args.image:
