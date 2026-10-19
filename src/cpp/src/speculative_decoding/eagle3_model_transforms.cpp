@@ -400,8 +400,9 @@ std::vector<ov::Output<ov::Node>> find_decoder_layer_hidden_state_outputs(
 void transform_hidden_state(std::shared_ptr<ov::Model>& model, const std::vector<int32_t>& hidden_layers_to_abstract) {
     if (hidden_layers_to_abstract.size() == 1 && hidden_layers_to_abstract.front() == -1 &&
         model->has_rt_info("gguf_architecture")) {
-        OPENVINO_ASSERT(std::any_of(model->outputs().begin(),
-                                    model->outputs().end(),
+        const auto outputs = model->outputs();
+        OPENVINO_ASSERT(std::any_of(outputs.begin(),
+                                    outputs.end(),
                                     [](const auto& output) {
                                         return output.get_names().count("last_hidden_state");
                                     }),

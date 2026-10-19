@@ -83,6 +83,10 @@ public:
             m_selector_block_size = model_desc.model->get_rt_info<int>("gguf.dflash_block_size");
             m_candidate_position_offset = 1;
         }
+        if (model_desc.model->has_rt_info("gguf.dflash_markov")) {
+            m_selector_block_size = model_desc.model->get_rt_info<int>("gguf.dflash_block_size");
+            m_candidate_position_offset = model_desc.model->get_rt_info<bool>("gguf.dflash_sample_from_anchor") ? 0 : 1;
+        }
         m_request = create_draft_infer_request(model_desc, static_cast<bool>(m_embedding_model));
         m_has_beam_idx = has_compiled_input(m_request.get_compiled_model(), "beam_idx");
         if (m_has_beam_idx) {
@@ -129,6 +133,8 @@ public:
         const size_t hidden_delta_length = hidden_delta_shape[0];
         if (m_selector_top_k > 0)
             candidate_count = size_t(m_selector_block_size - 1);
+        else if (m_selector_block_size > 0)
+            candidate_count = std::min(candidate_count, size_t(m_selector_block_size) - m_candidate_position_offset);
 
         auto input_ids = build_input_ids(seed_token, candidate_count);
         auto position_ids = build_position_ids(hidden_delta_length, candidate_count);
@@ -173,7 +179,9 @@ public:
             return candidates;
         }
         const auto shape = logits.get_shape();
-        for (size_t idx = 0; idx < candidate_count; ++idx) {
+        const auto offset = m_selector_block_size > 0 ? m_candidate_position_offset : 0;
+        candidate_count = std::min(candidate_count, shape[1] - offset);
+        for (size_t idx = offset; idx < offset + candidate_count; ++idx) {
             ov::Tensor one_position(logits, ov::Coordinate{0, idx, 0}, ov::Coordinate{1, idx + 1, shape[2]});
             auto sampled = sample_one_candidate(one_position);
             candidates.insert(candidates.end(), sampled.begin(), sampled.end());

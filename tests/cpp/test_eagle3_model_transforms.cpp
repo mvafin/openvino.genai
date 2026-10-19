@@ -69,6 +69,21 @@ TEST(Eagle3ModelTransforms, MovesGgufEncoderAndPreservesRankThreeBoundary) {
         EXPECT_FLOAT_EQ(output.data<const float>()[i], 6.0f);
 }
 
+TEST(Eagle3ModelTransforms, PreservesGgufDraftPrenormOutput) {
+    using namespace ov::op;
+    auto hidden = std::make_shared<v0::Parameter>(ov::element::f32, ov::PartialShape{1, -1, 4});
+    hidden->output(0).set_names({"last_hidden_state"});
+    auto logits = std::make_shared<v0::Parameter>(ov::element::f32, ov::PartialShape{1, -1, 32});
+    logits->output(0).set_names({"logits"});
+    auto model = std::make_shared<ov::Model>(ov::OutputVector{logits, hidden}, ov::ParameterVector{logits, hidden});
+    model->set_rt_info(std::string("eagle3"), "gguf_architecture");
+    EXPECT_NO_THROW(ov::genai::utils::eagle3::transform_hidden_state(model, {-1}));
+    EXPECT_EQ(model->output("last_hidden_state").get_partial_shape(), hidden->get_output_partial_shape(0));
+    auto missing = std::make_shared<ov::Model>(ov::OutputVector{logits}, ov::ParameterVector{logits});
+    missing->set_rt_info(std::string("eagle3"), "gguf_architecture");
+    EXPECT_THROW(ov::genai::utils::eagle3::transform_hidden_state(missing, {-1}), ov::Exception);
+}
+
 TEST(Eagle3ModelTransforms, FindsTaggedGgufEmbeddingWithSmallVocabulary) {
     using namespace ov::op;
     auto ids = std::make_shared<v0::Parameter>(ov::element::i64, ov::PartialShape{1, -1});
