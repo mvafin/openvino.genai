@@ -104,3 +104,20 @@ Continuous batching functionality is used within OpenVINO Model Server (OVMS) to
 The OpenVINO™ GenAI repository is licensed under [Apache License Version 2.0](LICENSE).
 By contributing to the project, you agree to the license and copyright terms therein and release
 your contribution under these terms.
+
+### Additional GGUF families on the mmproj branch
+
+The companion OpenVINO frontend changes add Qwen3VL DeepStack, MiniCPM-V4.7 packed
+windows, Gemma3n MobileNet vision, Qwen3-ASR audio, Qwen3-Omni audio loading,
+EAGLE3/DFlash draft loading and Qwen3TTS speaker/predictor/waveform components.
+Use `GGUF_READER="FRONTEND"` and pass `mmproj_path` for multimodal GGUF files.
+The `draft_model()` helper accepts GGUF paths; omitted embedding/head weights are
+cloned from the target before compilation. DFlash also consumes selector and LiLiCorr lattices. CPU EAGLE3/DFlash use continuous batching;
+existing device and prefix-cache restrictions still apply.
+
+Qwen3TTS's GGUF subtalker accepts temperature 1, top-k 50, top-p 1 and sampling.
+Its public pipeline has passed repeated finite-PCM generation and exact seeded reset.
+Real quantized ASR/TTS parity, Gemma3n's original numerical gate, draft end-to-end
+acceptance, Omni audio preprocessing and full media/configuration matrices remain
+outstanding. See the companion frontend's supported-model and mmproj documentation
+for the exact implemented contracts and validation limitations.

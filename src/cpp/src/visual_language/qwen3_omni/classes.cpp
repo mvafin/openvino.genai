@@ -8,10 +8,6 @@
 #include <cstring>
 #include <string>
 
-#include "utils.hpp"
-#include "visual_language/clip.hpp"
-#include "visual_language/vl_sdpa_transformations.hpp"
-
 #include "openvino/core/model.hpp"
 #include "openvino/op/clamp.hpp"
 #include "openvino/op/concat.hpp"
@@ -24,6 +20,9 @@
 #include "openvino/op/result.hpp"
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/transpose.hpp"
+#include "utils.hpp"
+#include "visual_language/clip.hpp"
+#include "visual_language/vl_sdpa_transformations.hpp"
 
 namespace ov::genai {
 
@@ -136,10 +135,9 @@ std::shared_ptr<ov::Model> build_patch_rearrange_model() {
     auto result = std::make_shared<ov::op::v0::Result>(flattened);
     result->output(0).get_tensor().set_names({"patches_2d"});
 
-    return std::make_shared<ov::Model>(
-        ov::ResultVector{result},
-        ov::ParameterVector{patches, reshape_shape8d, reshape_shape4d, reshape_shape2d},
-        "qwen3_omni_patch_rearrange");
+    return std::make_shared<ov::Model>(ov::ResultVector{result},
+                                       ov::ParameterVector{patches, reshape_shape8d, reshape_shape4d, reshape_shape2d},
+                                       "qwen3_omni_patch_rearrange");
 }
 
 // Build the full preprocessing model (Stage 2): raw u8 frame(s) -> resize + normalize ->
@@ -188,8 +186,7 @@ std::shared_ptr<ov::Model> build_patch_preprocess_model() {
 
     auto frame0 = create_resize_normalize(raw_frame_0, resize_target, image_mean, image_scale);
     auto frame1 = create_resize_normalize(raw_frame_1, resize_target, image_mean, image_scale);
-    auto temporal =
-        std::make_shared<ov::op::v0::Concat>(ov::OutputVector{frame0->output(0), frame1->output(0)}, 0);
+    auto temporal = std::make_shared<ov::op::v0::Concat>(ov::OutputVector{frame0->output(0), frame1->output(0)}, 0);
 
     auto flattened = append_patch_rearrange(temporal, reshape_shape8d, reshape_shape4d, reshape_shape2d);
     auto result = std::make_shared<ov::op::v0::Result>(flattened);
@@ -243,8 +240,7 @@ VisionEncoderQwen3Omni::VisionEncoderQwen3Omni(const ModelsMap& models_map,
     initialize_patch_preprocessing(device, properties);
 }
 
-void VisionEncoderQwen3Omni::initialize_patch_preprocessing(const std::string& device,
-                                                             const ov::AnyMap& properties) {
+void VisionEncoderQwen3Omni::initialize_patch_preprocessing(const std::string& device, const ov::AnyMap& properties) {
     // Vision encoder runs no transformer inference, but a tiny model offloads patch
     // preprocessing (resize/normalize and/or reshape/transpose/flatten) to `device`.
     m_preproc_mode = parse_preproc_mode_env();
@@ -254,13 +250,17 @@ void VisionEncoderQwen3Omni::initialize_patch_preprocessing(const std::string& d
     }
 
     // Preserve the requested device and surface compilation errors instead of silently changing paths.
-    auto model = m_preproc_mode == PatchPreprocMode::OV ? build_patch_preprocess_model()
-                                                        : build_patch_rearrange_model();
-    auto compiled = utils::singleton_core().compile_model(
-        model, device, utils::get_model_properties(properties, "vision_embeddings", device));
+    auto model =
+        m_preproc_mode == PatchPreprocMode::OV ? build_patch_preprocess_model() : build_patch_rearrange_model();
+    auto compiled =
+        utils::singleton_core().compile_model(model,
+                                              device,
+                                              utils::get_model_properties(properties, "vision_embeddings", device));
     m_ireq_queue_patch_rearrange = std::make_unique<CircularBufferQueue<ov::InferRequest>>(
         compiled.get_property(ov::optimal_number_of_infer_requests),
-        [&compiled]() -> ov::InferRequest { return compiled.create_infer_request(); });
+        [&compiled]() -> ov::InferRequest {
+            return compiled.create_infer_request();
+        });
 }
 
 void VisionEncoderQwen3Omni::preprocess_to_patches(const std::vector<ov::Tensor>& images,
@@ -363,8 +363,7 @@ void VisionEncoderQwen3Omni::preprocess_to_patches(const std::vector<ov::Tensor>
         return;
     } else {
         // CPU resize + normalize into the temporal-stacked f32 NCHW patches.
-        ov::Tensor tiled_patches(ov::element::f32,
-                                 {tps, channel, target_image_size.height, target_image_size.width});
+        ov::Tensor tiled_patches(ov::element::f32, {tps, channel, target_image_size.height, target_image_size.width});
         for (size_t i = 0; i < tps; i++) {
             const auto& image = images.size() > i ? images[i] : images[0];
             auto input_image = tensor_to_clip_image_u8(image);
@@ -435,13 +434,13 @@ EncodedVideo VisionEncoderQwen3Omni::encode_frames(const std::vector<ov::Tensor>
     size_t frame_id = 0;
     size_t i = 0;
     for (; i + config.temporal_patch_size <= frames_size; i += config.temporal_patch_size) {
-        preprocess_to_patches(std::vector<ov::Tensor>(frames.begin() + i,
-                                                      frames.begin() + i + config.temporal_patch_size),
-                              config,
-                              encoded_video.video_features,
-                              encoded_video.resized_source_size,
-                              encoded_video.frame_num,
-                              frame_id);
+        preprocess_to_patches(
+            std::vector<ov::Tensor>(frames.begin() + i, frames.begin() + i + config.temporal_patch_size),
+            config,
+            encoded_video.video_features,
+            encoded_video.resized_source_size,
+            encoded_video.frame_num,
+            frame_id);
         frame_id++;
     }
     for (; i < frames_size; i++) {
@@ -479,9 +478,12 @@ InputsEmbedderQwen3Omni::InputsEmbedderQwen3Omni(const VLMConfig& vlm_config,
         // "attention_mask" parameter with a packed "cu_seq_lens" input (eliminates N*N score I/O).
         utils::request_vl_sdpa_transformations(model);
         auto compiled = utils::singleton_core().compile_model(
-            model, device, utils::get_model_properties(device_config, "vision_embeddings", device));
+            model,
+            device,
+            utils::get_model_properties(device_config, "vision_embeddings", device));
         m_with_cu_seqlens_input = utils::has_vl_sdpa_input(compiled, "cu_seq_lens");
-        ov::genai::utils::print_compiled_model_properties(compiled,
+        ov::genai::utils::print_compiled_model_properties(
+            compiled,
             m_with_cu_seqlens_input ? "Omni vision embeddings model with VLSDPA optimization ENABLED"
                                     : "Omni vision embeddings model with VLSDPA optimization DISABLED");
         m_ireq_queue_merged_vision = std::make_unique<CircularBufferQueue<ov::InferRequest>>(
@@ -517,9 +519,12 @@ InputsEmbedderQwen3Omni::InputsEmbedderQwen3Omni(const VLMConfig& vlm_config,
         // "attention_mask" parameter with a packed "cu_seq_lens" input (eliminates N*N score I/O).
         utils::request_vl_sdpa_transformations(model);
         auto compiled = utils::singleton_core().compile_model(
-            model, device, utils::get_model_properties(device_config, "vision_embeddings", device));
+            model,
+            device,
+            utils::get_model_properties(device_config, "vision_embeddings", device));
         m_with_cu_seqlens_input = utils::has_vl_sdpa_input(compiled, "cu_seq_lens");
-        ov::genai::utils::print_compiled_model_properties(compiled,
+        ov::genai::utils::print_compiled_model_properties(
+            compiled,
             m_with_cu_seqlens_input ? "Omni vision embeddings model with VLSDPA optimization ENABLED"
                                     : "Omni vision embeddings model with VLSDPA optimization DISABLED");
         m_ireq_queue_merged_vision = std::make_unique<CircularBufferQueue<ov::InferRequest>>(
@@ -533,7 +538,17 @@ InputsEmbedderQwen3Omni::InputsEmbedderQwen3Omni(const VLMConfig& vlm_config,
     }
 }
 
+InputsEmbedderQwen3Omni::InputsEmbedderQwen3Omni(const VLMModels& models,
+                                                 const Tokenizer& tokenizer,
+                                                 const std::string& device,
+                                                 const ov::AnyMap& properties)
+    : InputsEmbedderQwen3VL(models, tokenizer, device, properties),
+      m_audio_token_id(models.config.audio_token_id),
+      m_tokenizer_encodes_audio_pad(encodes_audio_pad_as_single_token(m_tokenizer, m_audio_token_id)) {}
+
 std::vector<ov::genai::EncodedAudio> InputsEmbedderQwen3Omni::encode_audios(const std::vector<ov::Tensor>& audios) {
+    if (IInputsEmbedder::m_audio_encoder)
+        return encode_audios_with_encoder(audios, false);
     if (audios.empty()) {
         return {};
     }
@@ -630,8 +645,8 @@ void expand_audio_tags(std::string& prompt,
                        const std::vector<EncodedAudio>& audios,
                        const std::vector<size_t>& audios_sequence,
                        size_t base_audio_id) {
-    const std::string native_tag = std::string(qwen3_omni::AUDIO_START_TAG) +
-                                   std::string(qwen3_omni::AUDIO_PAD_TAG) + std::string(qwen3_omni::AUDIO_END_TAG);
+    const std::string native_tag = std::string(qwen3_omni::AUDIO_START_TAG) + std::string(qwen3_omni::AUDIO_PAD_TAG) +
+                                   std::string(qwen3_omni::AUDIO_END_TAG);
 
     size_t searched_pos = 0;
     for (size_t k = 0; k < audios_sequence.size(); k++) {
@@ -804,8 +819,8 @@ NormalizedPrompt InputsEmbedderQwen3Omni::normalize_prompt(const std::string& pr
 
     // Runs even when audios is empty: a prompt carrying <ov_genai_audio_0> with no audio supplied
     // must be rejected by verify_ids, and returning early here would let it through silently.
-    const std::string native_tag = std::string(qwen3_omni::AUDIO_START_TAG) +
-                                   std::string(qwen3_omni::AUDIO_PAD_TAG) + std::string(qwen3_omni::AUDIO_END_TAG);
+    const std::string native_tag = std::string(qwen3_omni::AUDIO_START_TAG) + std::string(qwen3_omni::AUDIO_PAD_TAG) +
+                                   std::string(qwen3_omni::AUDIO_END_TAG);
 
     // Same policy as images and video, so audio inherits the mixing and range checks. One pad
     // each here; the expansion pass below grows them to the encoder-derived length.

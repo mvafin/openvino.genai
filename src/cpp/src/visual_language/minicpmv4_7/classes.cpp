@@ -28,13 +28,11 @@ int ensure_divide(const double length, const int divisor) {
 
 // Picks the size for resizing a crop (thumbnail or slice). Keeps aspect ratio and targets
 // model's preferred resolution, ensuring that result can be evenly divided into patches.
-ImageSize find_best_resize(
-    const double height,
-    const double width,
-    const int scale_resolution,
-    const int patch_size,
-    const bool allow_upscale
-) {
+ImageSize find_best_resize(const double height,
+                           const double width,
+                           const int scale_resolution,
+                           const int patch_size,
+                           const bool allow_upscale) {
     double new_height = height;
     double new_width = width;
     if (height * width > static_cast<double>(scale_resolution) * scale_resolution || allow_upscale) {
@@ -43,9 +41,8 @@ ImageSize find_best_resize(
         new_width = new_height * aspect_ratio;
     }
     const int factor = patch_size * 4;
-    return {
-        static_cast<size_t>(ensure_divide(new_height, factor)),
-        static_cast<size_t>(ensure_divide(new_width, factor))};
+    return {static_cast<size_t>(ensure_divide(new_height, factor)),
+            static_cast<size_t>(ensure_divide(new_width, factor))};
 }
 
 // Calculates slices grid, zeroed (no slices) if image is too small for slicing
@@ -82,25 +79,21 @@ SlicesGrid get_slices_grid(const int height, const int width, const int max_slic
 }
 
 // Picks the size for resizing original image before it is split into slices grid.
-ImageSize get_refine_size(
-    const int height,
-    const int width,
-    const SlicesGrid& grid,
-    const int scale_resolution,
-    const int patch_size
-) {
+ImageSize get_refine_size(const int height,
+                          const int width,
+                          const SlicesGrid& grid,
+                          const int scale_resolution,
+                          const int patch_size) {
     const int grid_rows = static_cast<int>(grid.rows);
     const int grid_cols = static_cast<int>(grid.cols);
     const int refine_height = ensure_divide(height, grid_rows);
     const int refine_width = ensure_divide(width, grid_cols);
     const bool allow_upscale = true;
-    const ImageSize best = find_best_resize(
-        static_cast<double>(refine_height) / grid_rows,
-        static_cast<double>(refine_width) / grid_cols,
-        scale_resolution,
-        patch_size,
-        allow_upscale
-    );
+    const ImageSize best = find_best_resize(static_cast<double>(refine_height) / grid_rows,
+                                            static_cast<double>(refine_width) / grid_cols,
+                                            scale_resolution,
+                                            patch_size,
+                                            allow_upscale);
     return {best.height * grid.rows, best.width * grid.cols};
 }
 
@@ -175,8 +168,7 @@ SlicedImage slice_image(const clip_image_u8& source, const ProcessorConfig& conf
         for (auto& slice : split_to_slices(refine_img, slice_h, slice_w)) {
             result.crops.push_back(std::move(slice));
             result.crop_sizes.push_back(
-                {static_cast<size_t>(slice_h) / patch_side, static_cast<size_t>(slice_w) / patch_side}
-            );
+                {static_cast<size_t>(slice_h) / patch_side, static_cast<size_t>(slice_w) / patch_side});
         }
         result.slices_grid = slices_grid;
     }
@@ -186,13 +178,11 @@ SlicedImage slice_image(const clip_image_u8& source, const ProcessorConfig& conf
 // Packs a crop of crop_size (height, width) patches into NaViT layout and applies normalization.
 // Shape: [1, 3, patch_size, num_patches * patch_size], num_patches = crop_h * crop_w
 // Mirrors MiniCPMV4_6ImageProcessor.reshape_by_patch.
-ov::Tensor pack_crop(
-    const clip_image_u8& crop,
-    const ImageSize& crop_size,
-    const std::array<float, 3>& norm_mean,
-    const std::array<float, 3>& norm_std,
-    const size_t patch_size
-) {
+ov::Tensor pack_crop(const clip_image_u8& crop,
+                     const ImageSize& crop_size,
+                     const std::array<float, 3>& norm_mean,
+                     const std::array<float, 3>& norm_std,
+                     const size_t patch_size) {
     const size_t crop_h = crop_size.height;
     const size_t crop_w = crop_size.width;
     const size_t width_px = crop_w * patch_size;
@@ -294,11 +284,9 @@ ov::Tensor build_window_index(const ImageSize& crop_size, const size_t window_ke
 // Builds the order in which tokens are grouped into blocks for the vision encoder's final spatial merge.
 // Shape: [num_patches / vision_downsample_factor], where
 // num_patches = crop_h * crop_w, vision_downsample_factor = window_kernel_size * merge_kernel_size
-ov::Tensor build_merge_index(
-    const ImageSize& crop_size,
-    const size_t window_kernel_size,
-    const size_t merge_kernel_size
-) {
+ov::Tensor build_merge_index(const ImageSize& crop_size,
+                             const size_t window_kernel_size,
+                             const size_t merge_kernel_size) {
     const size_t post_window_h = crop_size.height / window_kernel_size;
     const size_t post_window_w = crop_size.width / window_kernel_size;
     const size_t blocks_h = post_window_h / merge_kernel_size;
@@ -324,10 +312,8 @@ size_t calc_crop_token_count(const ImageSize& crop_size, const size_t downsample
     return (crop_size.height / downsample_factor) * (crop_size.width / downsample_factor);
 }
 
-std::vector<ImageSize> flatten_images_crop_sizes(
-    const std::vector<EncodedImage>& images,
-    const std::vector<size_t>& images_sequence
-) {
+std::vector<ImageSize> flatten_images_crop_sizes(const std::vector<EncodedImage>& images,
+                                                 const std::vector<size_t>& images_sequence) {
     std::vector<ImageSize> crop_sizes;
     for (size_t image_id : images_sequence) {
         const auto& image_crop_sizes = images.at(image_id).crop_sizes;
@@ -336,10 +322,8 @@ std::vector<ImageSize> flatten_images_crop_sizes(
     return crop_sizes;
 }
 
-std::vector<ImageSize> flatten_videos_crop_sizes(
-    const std::vector<EncodedVideo>& videos,
-    const std::vector<size_t>& videos_sequence
-) {
+std::vector<ImageSize> flatten_videos_crop_sizes(const std::vector<EncodedVideo>& videos,
+                                                 const std::vector<size_t>& videos_sequence) {
     std::vector<ImageSize> crop_sizes;
     for (size_t video_id : videos_sequence) {
         const EncodedVideo& video = videos.at(video_id);
@@ -351,22 +335,19 @@ std::vector<ImageSize> flatten_videos_crop_sizes(
 }
 
 // Builds [3, 1, seq_len] position ids [T, H, W] for LM and the rope delta (Canvas M-RoPE)
-std::pair<ov::Tensor, int64_t> create_position_ids(
-    const ov::Tensor& input_ids,
-    const std::vector<ImageSize>& images_crop_sizes,
-    const std::vector<ImageSize>& videos_crop_sizes,
-    const int64_t image_token_id,
-    const int64_t video_token_id,
-    const size_t downsample_factor
-) {
+std::pair<ov::Tensor, int64_t> create_position_ids(const ov::Tensor& input_ids,
+                                                   const std::vector<ImageSize>& images_crop_sizes,
+                                                   const std::vector<ImageSize>& videos_crop_sizes,
+                                                   const int64_t image_token_id,
+                                                   const int64_t video_token_id,
+                                                   const size_t downsample_factor) {
     const size_t seq_len = input_ids.get_size();
     const int64_t* input_ids_data = input_ids.data<int64_t>();
 
     ov::Tensor position_ids{ov::element::i64, {3, 1, seq_len}};
-    int64_t* channel[3] = {
-        position_ids.data<int64_t>(),
-        position_ids.data<int64_t>() + seq_len,
-        position_ids.data<int64_t>() + 2 * seq_len};
+    int64_t* channel[3] = {position_ids.data<int64_t>(),
+                           position_ids.data<int64_t>() + seq_len,
+                           position_ids.data<int64_t>() + 2 * seq_len};
 
     int64_t max_pos = 0;
     // Assigns identical sequential positions across all three M-RoPE channels to a text-token range.
@@ -438,36 +419,36 @@ std::pair<ov::Tensor, int64_t> create_position_ids(
 
 }  // namespace
 
-VisionEncoderMiniCPMv4_7::VisionEncoderMiniCPMv4_7(
-    const std::filesystem::path& model_dir,
-    const std::string& device,
-    const ov::AnyMap properties
-)
+VisionEncoderMiniCPMv4_7::VisionEncoderMiniCPMv4_7(const VLMModels& models,
+                                                   const std::string& device,
+                                                   const ov::AnyMap& properties)
+    : VisionEncoder(models, device, properties) {
+    update_vision_config(models.config);
+}
+
+VisionEncoderMiniCPMv4_7::VisionEncoderMiniCPMv4_7(const std::filesystem::path& model_dir,
+                                                   const std::string& device,
+                                                   const ov::AnyMap properties)
     : VisionEncoder(model_dir, device, properties) {}
 
-VisionEncoderMiniCPMv4_7::VisionEncoderMiniCPMv4_7(
-    const ModelsMap& models_map,
-    const std::filesystem::path& config_dir_path,
-    const std::string& device,
-    const ov::AnyMap device_config
-)
+VisionEncoderMiniCPMv4_7::VisionEncoderMiniCPMv4_7(const ModelsMap& models_map,
+                                                   const std::filesystem::path& config_dir_path,
+                                                   const std::string& device,
+                                                   const ov::AnyMap device_config)
     : VisionEncoder(models_map, config_dir_path, device, device_config) {}
 
 void VisionEncoderMiniCPMv4_7::update_vision_config(const VLMConfig& vlm_config) {
-    for (ProcessorConfig* config :
-         {static_cast<ProcessorConfig*>(&m_processor_config),
-          static_cast<ProcessorConfig*>(&m_video_processor_config)}) {
+    for (ProcessorConfig* config : {static_cast<ProcessorConfig*>(&m_processor_config),
+                                    static_cast<ProcessorConfig*>(&m_video_processor_config)}) {
         config->image_size = vlm_config.vision_config_image_size;
         config->window_kernel_size = vlm_config.vision_config_window_kernel_size;
         config->merge_kernel_size = vlm_config.merge_kernel_size;
     }
 }
 
-ov::Tensor VisionEncoderMiniCPMv4_7::encode_crops(
-    const std::vector<clip_image_u8>& crops,
-    const std::vector<ImageSize>& crop_sizes,
-    const ProcessorConfig& config
-) {
+ov::Tensor VisionEncoderMiniCPMv4_7::encode_crops(const std::vector<clip_image_u8>& crops,
+                                                  const std::vector<ImageSize>& crop_sizes,
+                                                  const ProcessorConfig& config) {
     const size_t num_patches_per_side = config.image_size / config.patch_size;
     const size_t window_kernel_size = config.window_kernel_size;
     const size_t merge_kernel_size = config.merge_kernel_size;
@@ -486,13 +467,21 @@ ov::Tensor VisionEncoderMiniCPMv4_7::encode_crops(
     size_t offset = 0;
     for (size_t i = 0; i < crops.size(); ++i) {
         const ImageSize& crop_size = crop_sizes[i];
-        encoder.set_tensor(
-            "pixel_values",
-            pack_crop(crops[i], crop_size, config.image_mean, config.image_std, config.patch_size)
-        );
+        encoder.set_tensor("pixel_values",
+                           pack_crop(crops[i], crop_size, config.image_mean, config.image_std, config.patch_size));
         encoder.set_tensor("position_ids", build_vision_position_ids(crop_size, num_patches_per_side));
         encoder.set_tensor("window_index", build_window_index(crop_size, window_kernel_size));
         encoder.set_tensor("merge_index", build_merge_index(crop_size, window_kernel_size, merge_kernel_size));
+        if (std::any_of(encoder.get_compiled_model().inputs().begin(),
+                        encoder.get_compiled_model().inputs().end(),
+                        [](const auto& input) {
+                            return input.get_names().count("patch_grid");
+                        })) {
+            ov::Tensor grid(ov::element::i64, {2});
+            grid.data<int64_t>()[0] = crop_size.height;
+            grid.data<int64_t>()[1] = crop_size.width;
+            encoder.set_tensor("patch_grid", grid);
+        }
         encoder.infer();
 
         const ov::Tensor& output = encoder.get_output_tensor();
@@ -539,11 +528,9 @@ EncodedVideo VisionEncoderMiniCPMv4_7::encode_frames(const std::vector<ov::Tenso
             all_crops.reserve(frames.size() * sliced_image.crops.size());
             all_crop_sizes.reserve(frames.size() * sliced_image.crop_sizes.size());
         }
-        all_crops.insert(
-            all_crops.end(),
-            std::make_move_iterator(sliced_image.crops.begin()),
-            std::make_move_iterator(sliced_image.crops.end())
-        );
+        all_crops.insert(all_crops.end(),
+                         std::make_move_iterator(sliced_image.crops.begin()),
+                         std::make_move_iterator(sliced_image.crops.end()));
         all_crop_sizes.insert(all_crop_sizes.end(), sliced_image.crop_sizes.begin(), sliced_image.crop_sizes.end());
     }
 
@@ -560,35 +547,39 @@ EncodedVideo VisionEncoderMiniCPMv4_7::encode_frames(const std::vector<ov::Tenso
     return encoded_video;
 }
 
-InputsEmbedderMiniCPMv4_7::InputsEmbedderMiniCPMv4_7(
-    const VLMConfig& vlm_config,
-    const std::filesystem::path& model_dir,
-    const Tokenizer& tokenizer,
-    const std::string& device,
-    const ov::AnyMap device_config
-)
+InputsEmbedderMiniCPMv4_7::InputsEmbedderMiniCPMv4_7(const VLMModels& models,
+                                                     const Tokenizer& tokenizer,
+                                                     const std::string& device,
+                                                     const ov::AnyMap& properties)
+    : IInputsEmbedder(models, tokenizer, device, properties) {
+    static_cast<VisionEncoderMiniCPMv4_7&>(*m_vision_encoder).update_vision_config(m_vlm_config);
+}
+
+InputsEmbedderMiniCPMv4_7::InputsEmbedderMiniCPMv4_7(const VLMConfig& vlm_config,
+                                                     const std::filesystem::path& model_dir,
+                                                     const Tokenizer& tokenizer,
+                                                     const std::string& device,
+                                                     const ov::AnyMap device_config)
     : IInputsEmbedder(vlm_config, model_dir, tokenizer, device, device_config) {
     static_cast<VisionEncoderMiniCPMv4_7&>(*m_vision_encoder).update_vision_config(m_vlm_config);
 }
 
-InputsEmbedderMiniCPMv4_7::InputsEmbedderMiniCPMv4_7(
-    const VLMConfig& vlm_config,
-    const ModelsMap& models_map,
-    const Tokenizer& tokenizer,
-    const std::filesystem::path& config_dir_path,
-    const std::string& device,
-    const ov::AnyMap device_config
-)
+InputsEmbedderMiniCPMv4_7::InputsEmbedderMiniCPMv4_7(const VLMConfig& vlm_config,
+                                                     const ModelsMap& models_map,
+                                                     const Tokenizer& tokenizer,
+                                                     const std::filesystem::path& config_dir_path,
+                                                     const std::string& device,
+                                                     const ov::AnyMap device_config)
     : IInputsEmbedder(vlm_config, models_map, tokenizer, config_dir_path, device, device_config) {
     static_cast<VisionEncoderMiniCPMv4_7&>(*m_vision_encoder).update_vision_config(m_vlm_config);
 }
 
 void InputsEmbedderMiniCPMv4_7::encode_vision_token_ids() {
     std::call_once(m_vision_token_ids_once_flag, [this]() {
-        const auto encoded_vision_tokens = m_tokenizer.encode(
-            m_vlm_config.image_pad_token + m_vlm_config.video_pad_token,
-            ov::genai::add_special_tokens(false)
-        ).input_ids;
+        const auto encoded_vision_tokens = m_tokenizer
+                                               .encode(m_vlm_config.image_pad_token + m_vlm_config.video_pad_token,
+                                                       ov::genai::add_special_tokens(false))
+                                               .input_ids;
         OPENVINO_ASSERT(encoded_vision_tokens.get_size() == 2, "Encoded vision tokens must contain two tokens.");
         m_image_token_id = encoded_vision_tokens.data<int64_t>()[0];
         m_video_token_id = encoded_vision_tokens.data<int64_t>()[1];
@@ -597,12 +588,9 @@ void InputsEmbedderMiniCPMv4_7::encode_vision_token_ids() {
 
 std::vector<ov::genai::EncodedVideo> InputsEmbedderMiniCPMv4_7::encode_videos(
     const std::vector<ov::Tensor>& videos,
-    const std::vector<VideoMetadata>& videos_metadata
-) {
-    OPENVINO_ASSERT(
-        videos.size() == videos_metadata.size() || videos_metadata.empty(),
-        "Number of videos and videos metadata must match if metadata provided."
-    );
+    const std::vector<VideoMetadata>& videos_metadata) {
+    OPENVINO_ASSERT(videos.size() == videos_metadata.size() || videos_metadata.empty(),
+                    "Number of videos and videos metadata must match if metadata provided.");
 
     std::vector<EncodedVideo> encoded_videos;
     encoded_videos.reserve(videos.size());
@@ -617,13 +605,11 @@ std::vector<ov::genai::EncodedVideo> InputsEmbedderMiniCPMv4_7::encode_videos(
     return encoded_videos;
 }
 
-NormalizedPrompt InputsEmbedderMiniCPMv4_7::normalize_prompt(
-    const std::string& prompt,
-    size_t base_image_id,
-    size_t base_video_id,
-    const std::vector<EncodedImage>& images,
-    const std::vector<EncodedVideo>& videos
-) const {
+NormalizedPrompt InputsEmbedderMiniCPMv4_7::normalize_prompt(const std::string& prompt,
+                                                             size_t base_image_id,
+                                                             size_t base_video_id,
+                                                             const std::vector<EncodedImage>& images,
+                                                             const std::vector<EncodedVideo>& videos) const {
     const size_t downsample_factor =
         calc_vision_downsample_factor(m_vlm_config.vision_config_window_kernel_size, m_vlm_config.merge_kernel_size);
 
@@ -657,8 +643,10 @@ NormalizedPrompt InputsEmbedderMiniCPMv4_7::normalize_prompt(
         if (slices_grid.has_slices()) {
             for (size_t row = 0; row < slices_grid.rows; ++row) {
                 for (size_t col = 0; col < slices_grid.cols; ++col) {
-                    const size_t slice_tokens_num = calc_crop_token_count(crop_sizes.at(1 + row * slices_grid.cols + col), downsample_factor);
-                    expanded_tag += m_vlm_config.slice_start + repeat(image_pad_token, slice_tokens_num) + m_vlm_config.slice_end;
+                    const size_t slice_tokens_num =
+                        calc_crop_token_count(crop_sizes.at(1 + row * slices_grid.cols + col), downsample_factor);
+                    expanded_tag +=
+                        m_vlm_config.slice_start + repeat(image_pad_token, slice_tokens_num) + m_vlm_config.slice_end;
                 }
                 expanded_tag += '\n';
             }
@@ -670,14 +658,12 @@ NormalizedPrompt InputsEmbedderMiniCPMv4_7::normalize_prompt(
 
     // Videos - each frame is sliced like an image, per-frame tag (thumbnail + slices) is built once and repeated
     std::vector<size_t> videos_sequence;
-    std::tie(unified_prompt, videos_sequence) = normalize(
-        unified_prompt,
-        NATIVE_VIDEO_TAG,
-        NATIVE_VIDEO_TAG + '\n',
-        base_video_id,
-        videos.size(),
-        ModalityType::VIDEO
-    );
+    std::tie(unified_prompt, videos_sequence) = normalize(unified_prompt,
+                                                          NATIVE_VIDEO_TAG,
+                                                          NATIVE_VIDEO_TAG + '\n',
+                                                          base_video_id,
+                                                          videos.size(),
+                                                          ModalityType::VIDEO);
 
     const std::string& video_pad_token = m_vlm_config.video_pad_token;
     for (size_t new_video_id : videos_sequence) {
@@ -686,14 +672,17 @@ NormalizedPrompt InputsEmbedderMiniCPMv4_7::normalize_prompt(
         const auto& crop_sizes = encoded_video.crop_sizes;
 
         const size_t thumbnail_tokens_num = calc_crop_token_count(crop_sizes.at(0), downsample_factor);
-        std::string frame_tag = m_vlm_config.im_start + repeat(video_pad_token, thumbnail_tokens_num) + m_vlm_config.im_end;
+        std::string frame_tag =
+            m_vlm_config.im_start + repeat(video_pad_token, thumbnail_tokens_num) + m_vlm_config.im_end;
 
         const SlicesGrid& slices_grid = encoded_video.slices_grid;
         if (slices_grid.has_slices()) {
             for (size_t row = 0; row < slices_grid.rows; ++row) {
                 for (size_t col = 0; col < slices_grid.cols; ++col) {
-                    const size_t slice_tokens_num = calc_crop_token_count(crop_sizes.at(1 + row * slices_grid.cols + col), downsample_factor);
-                    frame_tag += m_vlm_config.slice_start + repeat(video_pad_token, slice_tokens_num) + m_vlm_config.slice_end;
+                    const size_t slice_tokens_num =
+                        calc_crop_token_count(crop_sizes.at(1 + row * slices_grid.cols + col), downsample_factor);
+                    frame_tag +=
+                        m_vlm_config.slice_start + repeat(video_pad_token, slice_tokens_num) + m_vlm_config.slice_end;
                 }
                 frame_tag += '\n';
             }
@@ -712,13 +701,11 @@ NormalizedPrompt InputsEmbedderMiniCPMv4_7::normalize_prompt(
     return {std::move(unified_prompt), std::move(image_sequence), std::move(videos_sequence)};
 }
 
-ov::Tensor InputsEmbedderMiniCPMv4_7::get_inputs_embeds(
-    const std::string& prompt,
-    const std::vector<ov::genai::EncodedImage>& images,
-    ov::genai::VLMPerfMetrics& metrics,
-    bool recalculate_merged_embeddings,
-    const std::vector<size_t>& image_sequence
-) {
+ov::Tensor InputsEmbedderMiniCPMv4_7::get_inputs_embeds(const std::string& prompt,
+                                                        const std::vector<ov::genai::EncodedImage>& images,
+                                                        ov::genai::VLMPerfMetrics& metrics,
+                                                        bool recalculate_merged_embeddings,
+                                                        const std::vector<size_t>& image_sequence) {
     return get_inputs_embeds(prompt, images, {}, metrics, recalculate_merged_embeddings, image_sequence, {}, {});
 }
 
@@ -730,8 +717,7 @@ ov::Tensor InputsEmbedderMiniCPMv4_7::get_inputs_embeds(
     bool recalculate_merged_embeddings,
     const std::vector<size_t>& image_sequence,
     const std::vector<size_t>& videos_sequence,
-    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count
-) {
+    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) {
     encode_vision_token_ids();
 
     ov::Tensor input_ids = get_encoded_input_ids(prompt, metrics);
@@ -740,17 +726,16 @@ ov::Tensor InputsEmbedderMiniCPMv4_7::get_inputs_embeds(
     EmbeddingsRequest& req = embeddings_request_guard.get();
     ov::Tensor text_embeds = get_text_embedding(req, input_ids, metrics);
 
-    const size_t downsample_factor = calc_vision_downsample_factor(m_vlm_config.vision_config_window_kernel_size, m_vlm_config.merge_kernel_size);
+    const size_t downsample_factor =
+        calc_vision_downsample_factor(m_vlm_config.vision_config_window_kernel_size, m_vlm_config.merge_kernel_size);
     const auto images_crop_sizes = flatten_images_crop_sizes(images, image_sequence);
     const auto videos_crop_sizes = flatten_videos_crop_sizes(videos, videos_sequence);
-    std::tie(m_position_ids, m_rope_delta) = create_position_ids(
-        input_ids,
-        images_crop_sizes,
-        videos_crop_sizes,
-        m_image_token_id,
-        m_video_token_id,
-        downsample_factor
-    );
+    std::tie(m_position_ids, m_rope_delta) = create_position_ids(input_ids,
+                                                                 images_crop_sizes,
+                                                                 videos_crop_sizes,
+                                                                 m_image_token_id,
+                                                                 m_video_token_id,
+                                                                 downsample_factor);
 
     // Non-owning view per crop for image embeds
     std::vector<ov::Tensor> image_embeds;
@@ -762,11 +747,9 @@ ov::Tensor InputsEmbedderMiniCPMv4_7::get_inputs_embeds(
         size_t offset = 0;
         for (const auto& crop_size : images.at(image_id).crop_sizes) {
             const size_t tokens_num = calc_crop_token_count(crop_size, downsample_factor);
-            image_embeds.emplace_back(
-                source.get_element_type(),
-                ov::Shape{1, tokens_num, hidden_size},
-                crop_data + offset * hidden_size
-            );
+            image_embeds.emplace_back(source.get_element_type(),
+                                      ov::Shape{1, tokens_num, hidden_size},
+                                      crop_data + offset * hidden_size);
             offset += tokens_num;
         }
     }
@@ -783,11 +766,9 @@ ov::Tensor InputsEmbedderMiniCPMv4_7::get_inputs_embeds(
         for (size_t frame = 0; frame < video.frame_num; ++frame) {
             for (const auto& crop_size : video.crop_sizes) {
                 const size_t tokens_num = calc_crop_token_count(crop_size, downsample_factor);
-                video_embeds.emplace_back(
-                    source.get_element_type(),
-                    ov::Shape{1, tokens_num, hidden_size},
-                    crop_data + offset * hidden_size
-                );
+                video_embeds.emplace_back(source.get_element_type(),
+                                          ov::Shape{1, tokens_num, hidden_size},
+                                          crop_data + offset * hidden_size);
                 offset += tokens_num;
             }
         }
@@ -815,8 +796,9 @@ ov::Tensor InputsEmbedderMiniCPMv4_7::get_inputs_embeds(
     return inputs_embeds;
 }
 
-std::pair<ov::Tensor, std::optional<int64_t>>
-InputsEmbedderMiniCPMv4_7::get_position_ids(const size_t inputs_embeds_size, const size_t history_size) {
+std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderMiniCPMv4_7::get_position_ids(
+    const size_t inputs_embeds_size,
+    const size_t history_size) {
     if (history_size != 0) {
         return get_generation_phase_position_ids(inputs_embeds_size, history_size, m_rope_delta);
     }
@@ -826,12 +808,9 @@ InputsEmbedderMiniCPMv4_7::get_position_ids(const size_t inputs_embeds_size, con
 std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderMiniCPMv4_7::get_generation_phase_position_ids(
     const size_t inputs_embeds_size,
     const size_t history_size,
-    int64_t rope_delta
-) {
-    OPENVINO_ASSERT(
-        history_size != 0,
-        "get_generation_phase_position_ids() should only be called during the generation phase."
-    );
+    int64_t rope_delta) {
+    OPENVINO_ASSERT(history_size != 0,
+                    "get_generation_phase_position_ids() should only be called during the generation phase.");
     ov::Tensor position_ids{ov::element::i64, {3, 1, inputs_embeds_size}};
     const int64_t new_pos_id = static_cast<int64_t>(history_size) + rope_delta;
     for (size_t dim = 0; dim < 3; ++dim) {

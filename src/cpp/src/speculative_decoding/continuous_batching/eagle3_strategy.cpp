@@ -1,22 +1,23 @@
 // Copyright (C) 2023-2026 Intel Corporation
 // SPDX-License-Identifier: Apache-2.0
 
+#include "eagle3_strategy.hpp"
+
 #include <algorithm>
 
-#include "eagle3_strategy.hpp"
 #include "openvino/pass/pa_kv_reorder_fusion.hpp"
 #include "speculative_decoding/eagle3_model_transforms.hpp"
 
 namespace ov::genai {
 KVUpdateWrapper::KVUpdateWrapper(const ov::genai::ModelDesc& kv_model_desc) {
     m_compiled_model =
-            utils::singleton_core().compile_model(kv_model_desc.model, kv_model_desc.device, kv_model_desc.properties);
+        utils::singleton_core().compile_model(kv_model_desc.model, kv_model_desc.device, kv_model_desc.properties);
     m_request = m_compiled_model.create_infer_request();
 }
 
 ContinuousBatchingPipeline::Eagle3DecodingImpl::Eagle3DecodingImpl(const ov::genai::ModelDesc& main_model_desc,
-                                                                 const ov::genai::ModelDesc& draft_model_desc,
-                                                                 const std::vector<int32_t>& hidden_layers) {
+                                                                   const ov::genai::ModelDesc& draft_model_desc,
+                                                                   const std::vector<int32_t>& hidden_layers) {
     // Enable query-to-query bias for Eagle3 main model only
     ov::genai::ModelDesc main_model_desc_with_qq_bias = main_model_desc;
     main_model_desc_with_qq_bias.properties["query_to_query_bias"] = true;
@@ -41,7 +42,8 @@ ContinuousBatchingPipeline::Eagle3DecodingImpl::Eagle3DecodingImpl(const ov::gen
     // main and draft model use same tokenizer, but could differ in configurations
     // for example, llama3 draft model has different eos_token_id in config.json
     const Tokenizer& main_model_tokenizer = main_model_desc.tokenizer;
-    const Tokenizer& draft_model_tokenizer = draft_model_desc.tokenizer;
+    const Tokenizer& draft_model_tokenizer =
+        draft_model->has_rt_info("gguf_architecture") ? main_model_tokenizer : draft_model_desc.tokenizer;
     m_tokenizer = main_model_tokenizer;
     // for eagle model, we need to obtain hidden layer state as extra output
     // apply transformations needed to run eagle model
@@ -96,7 +98,8 @@ ContinuousBatchingPipeline::Eagle3DecodingImpl::Eagle3DecodingImpl(const ov::gen
         kv_model_desc.properties[ov::hint::kv_cache_precision.name()] =
             main_model_desc.properties.at(ov::hint::kv_cache_precision.name());
     } else {
-        GENAI_INFO("kv cache precision not specified in main model properties. Leave to the plugin for default precision.");
+        GENAI_INFO(
+            "kv cache precision not specified in main model properties. Leave to the plugin for default precision.");
     }
 
     // Read the runtime KV cache precision from the compiled main model's key_cache input port: plugins may resolve the
@@ -116,7 +119,7 @@ ContinuousBatchingPipeline::Eagle3DecodingImpl::Eagle3DecodingImpl(const ov::gen
 
     m_perf_metrics = ov::genai::SDPerModelsPerfMetrics();
     m_perf_metrics.raw_metrics.m_inference_durations = {{MicroSeconds(0.0f)}};
-    m_draft_pipeline->raw_perf_metrics.m_inference_durations = {{ MicroSeconds(0.0f) }};
+    m_draft_pipeline->raw_perf_metrics.m_inference_durations = {{MicroSeconds(0.0f)}};
 
     // specific params update for eagle pipeline
     // check draft_model, retrieve d2t table if exists
@@ -132,9 +135,11 @@ ov::Tensor ContinuousBatchingPipeline::Eagle3DecodingImpl::create_draft_input(co
     }
 }
 
-ov::Tensor ContinuousBatchingPipeline::Eagle3DecodingImpl::create_draft_input_ids(const ov::Tensor& original_input_ids) {
+ov::Tensor ContinuousBatchingPipeline::Eagle3DecodingImpl::create_draft_input_ids(
+    const ov::Tensor& original_input_ids) {
     auto shape = original_input_ids.get_shape();
-    OPENVINO_ASSERT(shape.size() != 0u && shape.back() > 1u, "input_ids shape is invalid for creating eagle3 draft input_ids");
+    OPENVINO_ASSERT(shape.size() != 0u && shape.back() > 1u,
+                    "input_ids shape is invalid for creating eagle3 draft input_ids");
 
     size_t original_length = shape.back();
     size_t new_length = original_length - 1;
@@ -225,22 +230,23 @@ void ContinuousBatchingPipeline::Eagle3DecodingImpl::validate_awaiting_requests(
                     " (number of main requests with speculative decoding enabled).");
 }
 
-ov::Tensor ContinuousBatchingPipeline::Eagle3DecodingImpl::create_draft_input_embeddings(const ov::Tensor& original_input_embeddings) {
+ov::Tensor ContinuousBatchingPipeline::Eagle3DecodingImpl::create_draft_input_embeddings(
+    const ov::Tensor& original_input_embeddings) {
     auto shape = original_input_embeddings.get_shape();
 
     OPENVINO_ASSERT(shape.size() == 3u, "Input embedding tensor shape size should be 3.");
     OPENVINO_ASSERT(shape[0] == 1u, "Input embedding tensor only supports batch == 1.");
-    OPENVINO_ASSERT(shape[1] > 1u,
-                    "Input embedding tensor sequence length must be greater than 1 for creating eagle3 draft input embeddings.");
+    OPENVINO_ASSERT(
+        shape[1] > 1u,
+        "Input embedding tensor sequence length must be greater than 1 for creating eagle3 draft input embeddings.");
 
     // Return a ROI tensor that skips the first token row, i.e. embeddings[1:, :].
-    return ov::Tensor(original_input_embeddings,
-                      ov::Coordinate{0, 1, 0},
-                      ov::Coordinate{1, shape[1], shape[2]});
+    return ov::Tensor(original_input_embeddings, ov::Coordinate{0, 1, 0}, ov::Coordinate{1, shape[1], shape[2]});
 }
 
-void ContinuousBatchingPipeline::Eagle3DecodingImpl::update_eagle_pipeline_params(const std::shared_ptr<ov::op::v0::Constant>& d2t_tensor) {
-    auto m_main_eagle_pipeline  = std::dynamic_pointer_cast<ContinuousBatchingForEagle3DecodingImpl>(m_main_pipeline);
+void ContinuousBatchingPipeline::Eagle3DecodingImpl::update_eagle_pipeline_params(
+    const std::shared_ptr<ov::op::v0::Constant>& d2t_tensor) {
+    auto m_main_eagle_pipeline = std::dynamic_pointer_cast<ContinuousBatchingForEagle3DecodingImpl>(m_main_pipeline);
     auto m_draft_eagle_pipeline = std::dynamic_pointer_cast<ContinuousBatchingForEagle3DecodingImpl>(m_draft_pipeline);
     m_main_eagle_pipeline->set_hidden_state_export_needed(true);
     m_draft_eagle_pipeline->set_hidden_state_export_needed(true);
@@ -249,20 +255,16 @@ void ContinuousBatchingPipeline::Eagle3DecodingImpl::update_eagle_pipeline_param
     m_draft_eagle_pipeline->set_d2t_for_draft_decoding(d2t_tensor);
 }
 
-GenerationHandle
-ContinuousBatchingPipeline::Eagle3DecodingImpl::add_request(uint64_t request_id,
-                                                                 const ov::Tensor& input_ids,
-                                                                 const ov::genai::GenerationConfig& sampling_params,
-                                                                 std::optional<ov::Tensor> prompt_ids,
-                                                                 std::optional<std::unordered_map<std::string, ov::Tensor>> lm_extra_inputs) {
+GenerationHandle ContinuousBatchingPipeline::Eagle3DecodingImpl::add_request(
+    uint64_t request_id,
+    const ov::Tensor& input_ids,
+    const ov::genai::GenerationConfig& sampling_params,
+    std::optional<ov::Tensor> prompt_ids,
+    std::optional<std::unordered_map<std::string, ov::Tensor>> lm_extra_inputs) {
     std::lock_guard<std::mutex> lock(m_draft_generations_mutex);
     if (sampling_params.num_assistant_tokens.has_value() && sampling_params.num_assistant_tokens.value() == 0) {
         // No speculative draft for this request: run only the main model.
-        return m_main_pipeline->add_request(request_id,
-                                            input_ids,
-                                            sampling_params,
-                                            prompt_ids,
-                                            lm_extra_inputs);
+        return m_main_pipeline->add_request(request_id, input_ids, sampling_params, prompt_ids, lm_extra_inputs);
     }
 
     auto draft_sampling_params = sampling_params;
@@ -287,27 +289,28 @@ ContinuousBatchingPipeline::Eagle3DecodingImpl::add_request(uint64_t request_id,
     }
     // The speculative draft path only uses language-model inputs. Multimodal auxiliary inputs such as
     // deepstack/visual tensors are consumed only by the main model, so lm_extra_inputs are not forwarded here.
-    m_draft_generations.insert({request_id, m_draft_pipeline->add_request(request_id, draft_input, draft_sampling_params, draft_prompt_ids)});
+    m_draft_generations.insert(
+        {request_id, m_draft_pipeline->add_request(request_id, draft_input, draft_sampling_params, draft_prompt_ids)});
     // Restore main position_ids/rope_delta before adding to the main pipeline.
     if (m_model_input_type == ModelInputType::EMBEDDINGS && m_inputs_embedder && main_position_ids.get_size() > 0) {
         m_inputs_embedder->set_position_ids(main_position_ids);
         m_inputs_embedder->set_rope_delta(main_rope_delta.value_or(compute_rope_delta(main_position_ids)));
     }
-    auto main_generation = m_main_pipeline->add_request(request_id,
-                                                        input_ids,
-                                                        sampling_params,
-                                                        prompt_ids,
-                                                        lm_extra_inputs);
+    auto main_generation =
+        m_main_pipeline->add_request(request_id, input_ids, sampling_params, prompt_ids, lm_extra_inputs);
     align_request_pair_processed_prefix(request_id);
     return main_generation;
 }
 
-GenerationHandle
-ContinuousBatchingPipeline::Eagle3DecodingImpl::add_request(uint64_t request_id,
-                                                                 const std::string& prompt,
-                                                                 const ov::genai::GenerationConfig& sampling_params) {
+GenerationHandle ContinuousBatchingPipeline::Eagle3DecodingImpl::add_request(
+    uint64_t request_id,
+    const std::string& prompt,
+    const ov::genai::GenerationConfig& sampling_params) {
     if (m_model_input_type == ModelInputType::EMBEDDINGS) {
-        return ContinuousBatchingPipeline::IContinuousBatchingPipeline::add_request(request_id, prompt, {}, sampling_params);
+        return ContinuousBatchingPipeline::IContinuousBatchingPipeline::add_request(request_id,
+                                                                                    prompt,
+                                                                                    {},
+                                                                                    sampling_params);
     }
 
     std::lock_guard<std::mutex> lock(m_draft_generations_mutex);
@@ -323,7 +326,8 @@ ContinuousBatchingPipeline::Eagle3DecodingImpl::add_request(uint64_t request_id,
     // add_special_tokens is false for better compression rate
     auto input_ids = m_tokenizer.encode(prompt, ov::genai::add_special_tokens(false)).input_ids;
     ov::Tensor draft_input_ids = create_draft_input(input_ids);
-    m_draft_generations.insert({request_id, m_draft_pipeline->add_request(request_id, draft_input_ids, draft_sampling_params)});
+    m_draft_generations.insert(
+        {request_id, m_draft_pipeline->add_request(request_id, draft_input_ids, draft_sampling_params)});
     auto main_generation = m_main_pipeline->add_request(request_id, input_ids, sampling_params);
     align_request_pair_processed_prefix(request_id);
     return main_generation;
@@ -335,8 +339,7 @@ std::vector<EncodedGenerationResult> ContinuousBatchingPipeline::Eagle3DecodingI
     const StreamerVariant& streamer,
     const std::optional<std::vector<std::pair<ov::Tensor, std::optional<int64_t>>>>& position_ids,
     const std::optional<std::vector<ov::Tensor>>& prompt_ids,
-    const std::optional<std::vector<std::unordered_map<std::string, ov::Tensor>>>& lm_extra_inputs_list
-) {
+    const std::optional<std::vector<std::unordered_map<std::string, ov::Tensor>>>& lm_extra_inputs_list) {
     GenerateStrategy strategy;
     strategy.prepare_request = [this](size_t,
                                       const ov::Tensor& in_ids,
@@ -360,30 +363,37 @@ std::vector<EncodedGenerationResult> ContinuousBatchingPipeline::Eagle3DecodingI
                                   const std::vector<ov::Tensor>& input_ids,
                                   const std::vector<GenerationConfig>& sampling_params) {
         OPENVINO_ASSERT(!streamer_ptr->has_callback() ||
-                        (input_ids.size() == 1 &&
-                         (sampling_params[0].is_greedy_decoding() || sampling_params[0].is_tree_search())),
+                            (input_ids.size() == 1 &&
+                             (sampling_params[0].is_greedy_decoding() || sampling_params[0].is_tree_search())),
                         "Eagle3 streaming only supports batch size=1 with greedy or tree search");
     };
-    strategy.start_timer = [](){
+    strategy.start_timer = []() {
         return std::chrono::steady_clock::now();
     };
-    strategy.stop_timer = [](const TimePoint& start){
+    strategy.stop_timer = [](const TimePoint& start) {
         return PerfMetrics::get_microsec(std::chrono::steady_clock::now() - start);
     };
 
-    return generate_common(this, input_ids, sampling_params, streamer, position_ids, prompt_ids, lm_extra_inputs_list, strategy);
+    return generate_common(this,
+                           input_ids,
+                           sampling_params,
+                           streamer,
+                           position_ids,
+                           prompt_ids,
+                           lm_extra_inputs_list,
+                           strategy);
 }
 
 ov::Tensor ContinuousBatchingPipeline::Eagle3DecodingImpl::trim_first_token_sequence_tensor(const ov::Tensor& tensor,
-                                                                                             const char* tensor_name) {
+                                                                                            const char* tensor_name) {
     const ov::Shape shape = tensor.get_shape();
     OPENVINO_ASSERT(shape.size() == 2 || shape.size() == 3,
-                    "Expected ", tensor_name, " rank 2 or 3 for Eagle3 draft path.");
+                    "Expected ",
+                    tensor_name,
+                    " rank 2 or 3 for Eagle3 draft path.");
 
     const size_t seq_axis = shape.size() == 3 ? 2 : 1;
-    OPENVINO_ASSERT(shape[seq_axis] > 1,
-                    tensor_name,
-                    " sequence length must be greater than 1 for Eagle3 draft path.");
+    OPENVINO_ASSERT(shape[seq_axis] > 1, tensor_name, " sequence length must be greater than 1 for Eagle3 draft path.");
 
     ov::Coordinate begin(shape.size(), 0);
     ov::Coordinate end(shape.begin(), shape.end());
@@ -400,51 +410,54 @@ void ContinuousBatchingPipeline::Eagle3DecodingImpl::step() {
     // specific step for eagle3 to update main model kv cache after validation
     {
         // Launch KV update asynchronously
-        m_sync_future = std::async(std::launch::async, [wrapper = m_kv_update_wrapper, main_pipeline = std::move(main_pipeline)]() mutable {
-            auto main_generated_requests = main_pipeline->get_generated_requests();
-            std::vector<int32_t> block_update_indices, block_update_begins;
-            main_pipeline->collect_block_update_info(main_generated_requests,
-                                                     block_update_indices,
-                                                     block_update_begins);
+        m_sync_future = std::async(
+            std::launch::async,
+            [wrapper = m_kv_update_wrapper, main_pipeline = std::move(main_pipeline)]() mutable {
+                auto main_generated_requests = main_pipeline->get_generated_requests();
+                std::vector<int32_t> block_update_indices, block_update_begins;
+                main_pipeline->collect_block_update_info(main_generated_requests,
+                                                         block_update_indices,
+                                                         block_update_begins);
 
-            if (block_update_indices.empty()) {
-                return;
-            }
-
-            ov::Tensor block_indices_tensor = main_pipeline->get_tensor_by_name("block_indices");
-            ov::Tensor block_indices_begins_tensor = main_pipeline->get_tensor_by_name("block_indices_begins");
-            ov::Tensor block_update_indices_tensor(ov::element::i32,
-                                                   {block_update_indices.size()},
-                                                   block_update_indices.data());
-            ov::Tensor block_update_indices_begins_tensor(ov::element::i32,
-                                                          {block_update_begins.size()},
-                                                          block_update_begins.data());
-
-            // Collect KV caches directly from main model's infer request
-            // The infer request already has all KV cache tensors set by cache_manager
-            std::vector<ov::Tensor> key_caches, value_caches;
-            for (const auto& input : wrapper->get_compiled_model().inputs()) {
-                auto input_name = input.get_any_name();
-                if (input_name.find("key_cache.") == 0) {
-                    // Extract layer_id from "key_cache.N" format (note: uses dot, not underscore)
-                    size_t layer_id = std::stoul(input_name.substr(std::string("key_cache.").size()));
-                    if (layer_id >= key_caches.size()) {
-                        key_caches.resize(layer_id + 1);
-                        value_caches.resize(layer_id + 1);
-                    }
-                    // Get tensors directly from main model's infer request instead of going through scheduler
-                    key_caches[layer_id] = main_pipeline->get_tensor_by_name(input_name);
-                    value_caches[layer_id] = main_pipeline->get_tensor_by_name("value_cache." + std::to_string(layer_id));
+                if (block_update_indices.empty()) {
+                    return;
                 }
-            }
 
-            wrapper->infer(block_indices_tensor,
-                          block_indices_begins_tensor,
-                          block_update_indices_tensor,
-                          block_update_indices_begins_tensor,
-                          key_caches,
-                          value_caches);
-        });
+                ov::Tensor block_indices_tensor = main_pipeline->get_tensor_by_name("block_indices");
+                ov::Tensor block_indices_begins_tensor = main_pipeline->get_tensor_by_name("block_indices_begins");
+                ov::Tensor block_update_indices_tensor(ov::element::i32,
+                                                       {block_update_indices.size()},
+                                                       block_update_indices.data());
+                ov::Tensor block_update_indices_begins_tensor(ov::element::i32,
+                                                              {block_update_begins.size()},
+                                                              block_update_begins.data());
+
+                // Collect KV caches directly from main model's infer request
+                // The infer request already has all KV cache tensors set by cache_manager
+                std::vector<ov::Tensor> key_caches, value_caches;
+                for (const auto& input : wrapper->get_compiled_model().inputs()) {
+                    auto input_name = input.get_any_name();
+                    if (input_name.find("key_cache.") == 0) {
+                        // Extract layer_id from "key_cache.N" format (note: uses dot, not underscore)
+                        size_t layer_id = std::stoul(input_name.substr(std::string("key_cache.").size()));
+                        if (layer_id >= key_caches.size()) {
+                            key_caches.resize(layer_id + 1);
+                            value_caches.resize(layer_id + 1);
+                        }
+                        // Get tensors directly from main model's infer request instead of going through scheduler
+                        key_caches[layer_id] = main_pipeline->get_tensor_by_name(input_name);
+                        value_caches[layer_id] =
+                            main_pipeline->get_tensor_by_name("value_cache." + std::to_string(layer_id));
+                    }
+                }
+
+                wrapper->infer(block_indices_tensor,
+                               block_indices_begins_tensor,
+                               block_update_indices_tensor,
+                               block_update_indices_begins_tensor,
+                               key_caches,
+                               value_caches);
+            });
     }
 }
 }  // namespace ov::genai

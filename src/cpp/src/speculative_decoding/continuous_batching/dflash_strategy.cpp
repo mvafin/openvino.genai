@@ -5,14 +5,14 @@
 
 #include <algorithm>
 #include <limits>
+#include <openvino/pass/sdpa_to_paged_attention.hpp>
 #include <string>
 #include <vector>
-
-#include <openvino/pass/sdpa_to_paged_attention.hpp>
 
 #include "continuous_batching/paged_attention_transformations.hpp"
 #include "sampling/sampler.hpp"
 #include "sequence_group.hpp"
+#include "speculative_decoding/eagle3_model_transforms.hpp"
 #include "utils.hpp"
 #include "visual_language/embedding_model.hpp"
 #include "visual_language/inputs_embedder.hpp"
@@ -33,15 +33,15 @@ std::vector<float> zero_log_probs(size_t count) {
 bool has_compiled_input(const ov::CompiledModel& model, const std::string& name) {
     const auto inputs = model.inputs();
     return std::find_if(inputs.begin(), inputs.end(), [&](const ov::Output<const ov::Node>& port) {
-        return port.get_names().count(name) != 0;
-    }) != inputs.end();
+               return port.get_names().count(name) != 0;
+           }) != inputs.end();
 }
 
 bool model_has_output(const std::shared_ptr<ov::Model>& model, const std::string& name) {
     const auto outputs = model->outputs();
     return std::find_if(outputs.begin(), outputs.end(), [&](const ov::Output<ov::Node>& port) {
-        return port.get_names().count(name) != 0;
-    }) != outputs.end();
+               return port.get_names().count(name) != 0;
+           }) != outputs.end();
 }
 
 void validate_target_has_no_unmanaged_state(const std::shared_ptr<ov::Model>& model) {
@@ -55,7 +55,8 @@ void validate_target_has_no_unmanaged_state(const std::shared_ptr<ov::Model>& mo
     }
     OPENVINO_ASSERT(unmanaged_state_ops.empty(),
                     "DFlash CB/PA target model contains unmanaged state op(s) after paging conversion. ",
-                    "First unmanaged op: ", unmanaged_state_ops.empty() ? std::string{} : unmanaged_state_ops.front(),
+                    "First unmanaged op: ",
+                    unmanaged_state_ops.empty() ? std::string{} : unmanaged_state_ops.front(),
                     ". Convert KV, conv, and GatedDeltaNet state to managed paging before enabling DFlash.");
 }
 
@@ -69,10 +70,20 @@ public:
                         EmbeddingsModel::Ptr embedding_model = nullptr)
         : m_tokenizer(tokenizer),
           m_embedding_model(std::move(embedding_model)),
-          m_request(create_draft_infer_request(model_desc, static_cast<bool>(m_embedding_model))),
           m_sampler(tokenizer),
           m_mask_token_id(rt_info.mask_token_id),
           m_candidate_position_offset(rt_info.candidate_position_offset) {
+        if (model_desc.model->has_rt_info("gguf.dflash_selector_top_k")) {
+            m_selector_top_k = model_desc.model->get_rt_info<int>("gguf.dflash_selector_top_k");
+            m_selector_block_size = model_desc.model->get_rt_info<int>("gguf.dflash_block_size");
+            m_candidate_position_offset = 1;
+        }
+        if (model_desc.model->has_rt_info("gguf.lilicorr_top_k")) {
+            m_selector_top_k = model_desc.model->get_rt_info<int>("gguf.lilicorr_top_k");
+            m_selector_block_size = model_desc.model->get_rt_info<int>("gguf.dflash_block_size");
+            m_candidate_position_offset = 1;
+        }
+        m_request = create_draft_infer_request(model_desc, static_cast<bool>(m_embedding_model));
         m_has_beam_idx = has_compiled_input(m_request.get_compiled_model(), "beam_idx");
         if (m_has_beam_idx) {
             m_beam_idx = ov::Tensor(ov::element::i32, {BATCH_SIZE});
@@ -116,6 +127,8 @@ public:
         OPENVINO_ASSERT(hidden_delta_shape.size() == 3 && hidden_delta_shape[1] == BATCH_SIZE,
                         "DFlash draft hidden_states input must have shape [seq_len, 1, hidden].");
         const size_t hidden_delta_length = hidden_delta_shape[0];
+        if (m_selector_top_k > 0)
+            candidate_count = size_t(m_selector_block_size - 1);
 
         auto input_ids = build_input_ids(seed_token, candidate_count);
         auto position_ids = build_position_ids(hidden_delta_length, candidate_count);
@@ -142,11 +155,26 @@ public:
     std::vector<DraftCandidateToken> sample_candidates(const ov::Tensor& logits, size_t candidate_count) {
         std::vector<DraftCandidateToken> candidates;
         candidates.reserve(candidate_count);
+        if (m_selector_top_k > 0) {
+            const auto lattice = m_request.get_tensor("draft_lattice");
+            const auto shape = lattice.get_shape();
+            OPENVINO_ASSERT(
+                shape.size() == 3 && shape[0] == 1 && shape[2] >= size_t(m_selector_top_k * (m_selector_top_k + 1)),
+                "Invalid DFlash selector lattice shape");
+            size_t predecessor = 0;
+            const auto count = std::min({candidate_count, shape[1] - 1, size_t(m_selector_block_size - 1)});
+            for (size_t idx = 1; idx <= count; ++idx) {
+                const auto* row = lattice.data<const float>() + idx * shape[2];
+                const auto* scores = row + m_selector_top_k + predecessor * m_selector_top_k;
+                predecessor = std::max_element(scores, scores + m_selector_top_k) - scores;
+                candidates.push_back({static_cast<int64_t>(row[predecessor]), 0.f});
+            }
+            m_raw_perf_metrics.m_batch_sizes.emplace_back(candidates.size());
+            return candidates;
+        }
         const auto shape = logits.get_shape();
         for (size_t idx = 0; idx < candidate_count; ++idx) {
-            ov::Tensor one_position(logits,
-                                    ov::Coordinate{0, idx, 0},
-                                    ov::Coordinate{1, idx + 1, shape[2]});
+            ov::Tensor one_position(logits, ov::Coordinate{0, idx, 0}, ov::Coordinate{1, idx + 1, shape[2]});
             auto sampled = sample_one_candidate(one_position);
             candidates.insert(candidates.end(), sampled.begin(), sampled.end());
         }
@@ -180,7 +208,7 @@ private:
     }
 
     static ov::InferRequest create_draft_infer_request(const ov::genai::ModelDesc& model_desc,
-                                                        bool use_external_embeddings) {
+                                                       bool use_external_embeddings) {
         OPENVINO_ASSERT(model_desc.model, "DFlash draft model cannot be null.");
         OPENVINO_ASSERT(utils::has_input(model_desc.model, "hidden_states"),
                         "DFlash CB/PA draft model must have 'hidden_states' input.");
@@ -199,7 +227,8 @@ private:
                         "DFlash CB/PA draft model must have an 'attention_mask' input.");
         if (model_desc.device == "NPU") {
             auto kv_axes_pos = utils::get_kv_axes_pos(model_desc.model);
-            auto npu_compile_result = utils::compile_decoder_for_npu(model_desc.model, model_desc.properties, kv_axes_pos);
+            auto npu_compile_result =
+                utils::compile_decoder_for_npu(model_desc.model, model_desc.properties, kv_axes_pos);
             return npu_compile_result.first.create_infer_request();
         }
         return utils::singleton_core()
@@ -208,18 +237,24 @@ private:
     }
 
     ov::Tensor build_input_ids(int64_t seed_token, size_t candidate_count) const {
-        return dflash_cb::build_draft_input_ids(
-            seed_token, m_mask_token_id, candidate_count, m_candidate_position_offset);
+        return dflash_cb::build_draft_input_ids(seed_token,
+                                                m_mask_token_id,
+                                                candidate_count,
+                                                m_candidate_position_offset);
     }
 
     ov::Tensor build_position_ids(size_t hidden_delta_length, size_t candidate_count) const {
-        return dflash_cb::build_draft_position_ids(
-            m_committed_context_length, hidden_delta_length, candidate_count, m_candidate_position_offset);
+        return dflash_cb::build_draft_position_ids(m_committed_context_length,
+                                                   hidden_delta_length,
+                                                   candidate_count,
+                                                   m_candidate_position_offset);
     }
 
     ov::Tensor build_attention_mask(size_t hidden_delta_length, size_t candidate_count) const {
-        return dflash_cb::build_draft_attention_mask(
-            m_committed_context_length, hidden_delta_length, candidate_count, m_candidate_position_offset);
+        return dflash_cb::build_draft_attention_mask(m_committed_context_length,
+                                                     hidden_delta_length,
+                                                     candidate_count,
+                                                     m_candidate_position_offset);
     }
 
     std::vector<DraftCandidateToken> sample_one_candidate(const ov::Tensor& logits) {
@@ -270,6 +305,8 @@ private:
     size_t m_committed_context_length = 0;
     int64_t m_mask_token_id = -1;
     size_t m_candidate_position_offset = 1;
+    int m_selector_top_k = 0;
+    int m_selector_block_size = 0;
 };
 
 ContinuousBatchingPipeline::DFlashDecodingImpl::DFlashDecodingImpl(
@@ -278,6 +315,7 @@ ContinuousBatchingPipeline::DFlashDecodingImpl::DFlashDecodingImpl(
     const ov::genai::utils::dflash::DFlashRTInfo& rt_info)
     : m_rt_info(rt_info) {
     OPENVINO_ASSERT(m_rt_info.dflash_mode, "DFlash continuous batching requires dflash_mode=true.");
+    utils::eagle3::attach_gguf_target_weights(main_model_desc.model, draft_model_desc.model);
     OPENVINO_ASSERT(!m_rt_info.target_layer_ids.empty(), "DFlash target_layer_ids cannot be empty.");
     OPENVINO_ASSERT(!main_model_desc.scheduler_config.enable_prefix_caching,
                     "DFlash CB/PA does not support scheduler_config.enable_prefix_caching.");
@@ -290,8 +328,7 @@ ContinuousBatchingPipeline::DFlashDecodingImpl::DFlashDecodingImpl(
         m_model_input_type = ModelInputType::EMBEDDINGS;
         m_vision_registry = std::make_shared<VisionRegistry>();
     }
-    const auto draft_embedding_model =
-        m_inputs_embedder ? m_inputs_embedder->get_embedding_model() : nullptr;
+    const auto draft_embedding_model = m_inputs_embedder ? m_inputs_embedder->get_embedding_model() : nullptr;
 
     // Detect each draft capability independently from its I/O signature (no RT-info markers) and
     // apply only the missing transform(s); a well-formed draft has exactly one input/output per pair.
@@ -309,8 +346,7 @@ ContinuousBatchingPipeline::DFlashDecodingImpl::DFlashDecodingImpl(
     // Preserve the VLM draft's external inputs_embeds bridge. The legacy LLM
     // path still grafts an in-graph target embedding and remains input_ids-native.
     if (is_vlm_dflash) {
-        OPENVINO_ASSERT(needs_embedding_attach,
-                        "DFlash VLM draft model must be inputs_embeds-native.");
+        OPENVINO_ASSERT(needs_embedding_attach, "DFlash VLM draft model must be inputs_embeds-native.");
     } else if (needs_embedding_attach) {
         utils::dflash::attach_target_embedding_to_draft(main_model, draft_model_desc.model);
     }
@@ -336,10 +372,7 @@ ContinuousBatchingPipeline::DFlashDecodingImpl::DFlashDecodingImpl(
         .run_on_model(main_model);
     utils::apply_gather_before_matmul_transformation(main_model);
     validate_target_has_no_unmanaged_state(main_model);
-    utils::dflash::expose_target_hidden_states(
-        main_model,
-        retained_hidden_state_locators,
-        m_rt_info.target_layer_ids);
+    utils::dflash::expose_target_hidden_states(main_model, retained_hidden_state_locators, m_rt_info.target_layer_ids);
 
     m_tokenizer = main_model_desc.tokenizer;
     auto main_generation_config = main_model_desc.generation_config;
@@ -366,24 +399,22 @@ ContinuousBatchingPipeline::DFlashDecodingImpl::DFlashDecodingImpl(
                                                     draft_embedding_model);
 
     if (is_vlm_dflash) {
-        m_main_pipeline = std::make_shared<ContinuousBatchingForSpeculativeDecodingImpl>(
-            main_model,
-            m_inputs_embedder,
-            main_model_desc.tokenizer,
-            main_generation_config,
-            target_scheduler_config,
-            main_model_desc.device,
-            main_model_desc.properties,
-            true);
+        m_main_pipeline = std::make_shared<ContinuousBatchingForSpeculativeDecodingImpl>(main_model,
+                                                                                         m_inputs_embedder,
+                                                                                         main_model_desc.tokenizer,
+                                                                                         main_generation_config,
+                                                                                         target_scheduler_config,
+                                                                                         main_model_desc.device,
+                                                                                         main_model_desc.properties,
+                                                                                         true);
     } else {
-        m_main_pipeline = std::make_shared<ContinuousBatchingForSpeculativeDecodingImpl>(
-            main_model,
-            main_model_desc.tokenizer,
-            main_generation_config,
-            target_scheduler_config,
-            main_model_desc.device,
-            main_model_desc.properties,
-            true);
+        m_main_pipeline = std::make_shared<ContinuousBatchingForSpeculativeDecodingImpl>(main_model,
+                                                                                         main_model_desc.tokenizer,
+                                                                                         main_generation_config,
+                                                                                         target_scheduler_config,
+                                                                                         main_model_desc.device,
+                                                                                         main_model_desc.properties,
+                                                                                         true);
     }
     m_main_pipeline->set_hidden_state_export_needed(true);
 
@@ -418,8 +449,8 @@ GenerationConfig ContinuousBatchingPipeline::DFlashDecodingImpl::make_draft_gene
 }
 
 void ContinuousBatchingPipeline::DFlashDecodingImpl::append_pending_hidden_delta(RequestState& state,
-                                                                                const ov::Tensor& hidden_delta,
-                                                                                bool copy_data) {
+                                                                                 const ov::Tensor& hidden_delta,
+                                                                                 bool copy_data) {
     state.pending_hidden_deltas.append(hidden_delta, copy_data);
 }
 
@@ -427,8 +458,7 @@ bool ContinuousBatchingPipeline::DFlashDecodingImpl::has_pending_hidden_delta(co
     return !state.pending_hidden_deltas.empty();
 }
 
-ov::Tensor ContinuousBatchingPipeline::DFlashDecodingImpl::materialize_pending_hidden_delta(
-    const RequestState& state) {
+ov::Tensor ContinuousBatchingPipeline::DFlashDecodingImpl::materialize_pending_hidden_delta(const RequestState& state) {
     return state.pending_hidden_deltas.materialize();
 }
 
@@ -481,16 +511,17 @@ GenerationHandle ContinuousBatchingPipeline::DFlashDecodingImpl::add_request(
     }
     drop_finished_request_states();
     OPENVINO_ASSERT(!has_active_request_state() && !m_main_pipeline->has_non_finished_requests(),
-                    "DFlash CB/PA POC supports only one active request. Wait for the current request to finish before adding another.");
+                    "DFlash CB/PA POC supports only one active request. Wait for the current request to finish before "
+                    "adding another.");
 
     const auto input_shape = input_ids.get_shape();
     if (is_vlm_dflash) {
-        OPENVINO_ASSERT(input_ids.get_element_type() == ov::element::f32 &&
-                            input_shape.size() == 3 && input_shape[0] == 1 && input_shape[1] > 0,
+        OPENVINO_ASSERT(input_ids.get_element_type() == ov::element::f32 && input_shape.size() == 3 &&
+                            input_shape[0] == 1 && input_shape[1] > 0,
                         "DFlash VLM expects main input embeddings with shape [1, rows, hidden].");
     } else {
-        OPENVINO_ASSERT(input_ids.get_element_type() == ov::element::i64 &&
-                            input_shape.size() == 2 && input_shape[0] == 1 && input_shape[1] > 0,
+        OPENVINO_ASSERT(input_ids.get_element_type() == ov::element::i64 && input_shape.size() == 2 &&
+                            input_shape[0] == 1 && input_shape[1] > 0,
                         "Expected DFlash input_ids shape [1, seq_len].");
     }
     auto sampling_params_copy = sampling_params;
@@ -514,11 +545,7 @@ GenerationHandle ContinuousBatchingPipeline::DFlashDecodingImpl::add_request(
     // request creation fails, erase the state so a later request is not
     // rejected as a stale active DFlash request.
     try {
-        return m_main_pipeline->add_request(request_id,
-                                            input_ids,
-                                            sampling_params_copy,
-                                            prompt_ids,
-                                            lm_extra_inputs);
+        return m_main_pipeline->add_request(request_id, input_ids, sampling_params_copy, prompt_ids, lm_extra_inputs);
     } catch (...) {
         m_request_states.erase(request_id);
         throw;
@@ -530,11 +557,10 @@ GenerationHandle ContinuousBatchingPipeline::DFlashDecodingImpl::add_request(
     const std::string& prompt,
     const ov::genai::GenerationConfig& sampling_params) {
     if (m_model_input_type == ModelInputType::EMBEDDINGS) {
-        return ContinuousBatchingPipeline::IContinuousBatchingPipeline::add_request(
-            request_id,
-            prompt,
-            {},
-            sampling_params);
+        return ContinuousBatchingPipeline::IContinuousBatchingPipeline::add_request(request_id,
+                                                                                    prompt,
+                                                                                    {},
+                                                                                    sampling_params);
     }
     auto input_ids = m_tokenizer.encode(prompt).input_ids;
     return add_request(request_id, input_ids, sampling_params);
@@ -575,8 +601,8 @@ void ContinuousBatchingPipeline::DFlashDecodingImpl::step() {
 
         const size_t draft_count =
             dflash_cb::draft_candidate_count(state.generation_config.num_assistant_tokens.value(),
-                                            generated_len,
-                                            state.generation_config.max_new_tokens);
+                                             generated_len,
+                                             state.generation_config.max_new_tokens);
         const size_t validation_count =
             dflash_cb::validation_candidate_count(draft_count, generated_len, state.generation_config.max_new_tokens);
         if (validation_count == 0) {
@@ -596,10 +622,14 @@ void ContinuousBatchingPipeline::DFlashDecodingImpl::step() {
         state.draft_generated = candidates.size();
         OPENVINO_ASSERT(!candidates.empty(),
                         "DFlash draft sampler produced no candidates despite requested validation candidates. ",
-                        "request_id=", request_id,
-                        ", generated_before_draft=", state.generated_before_draft,
-                        ", draft_count=", draft_count,
-                        ", validation_count=", validation_count);
+                        "request_id=",
+                        request_id,
+                        ", generated_before_draft=",
+                        state.generated_before_draft,
+                        ", draft_count=",
+                        draft_count,
+                        ", validation_count=",
+                        validation_count);
         draft_generated_by_request[request_id] = candidates.size();
 
         auto candidate_tokens = state.generated_tokens;
@@ -640,8 +670,9 @@ void ContinuousBatchingPipeline::DFlashDecodingImpl::step() {
             continue;
         }
         auto& state = state_it->second;
-        const auto accounting =
-            dflash_cb::validation_accounting(draft_generated, state.generated_before_draft, state.generated_tokens.size());
+        const auto accounting = dflash_cb::validation_accounting(draft_generated,
+                                                                 state.generated_before_draft,
+                                                                 state.generated_tokens.size());
         if (!accounting.target_extended) {
             continue;
         }
@@ -677,7 +708,6 @@ void ContinuousBatchingPipeline::DFlashDecodingImpl::step() {
             m_sd_metrics.clean_up();
         }
     }
-
 }
 
 void ContinuousBatchingPipeline::DFlashDecodingImpl::update_draft_states_from_main(
@@ -690,13 +720,12 @@ void ContinuousBatchingPipeline::DFlashDecodingImpl::update_draft_states_from_ma
 
         auto& state = state_it->second;
         const auto& generated_sequence = generated_sequences.begin()->second;
-        const auto accounting =
-            dflash_cb::validation_accounting(state.draft_generated,
-                                             state.generated_before_draft,
-                                             generated_sequence.token_ids.size());
+        const auto accounting = dflash_cb::validation_accounting(state.draft_generated,
+                                                                 state.generated_before_draft,
+                                                                 generated_sequence.token_ids.size());
 
-        auto hidden_delta = dflash_cb::truncate_normalized_hidden_state_from_end(generated_sequence.hidden_states,
-                                                                                 accounting.rejected);
+        auto hidden_delta =
+            dflash_cb::truncate_normalized_hidden_state_from_end(generated_sequence.hidden_states, accounting.rejected);
         append_pending_hidden_delta(state, hidden_delta, generated_sequence.token_ids.empty());
         state.generated_tokens = generated_sequence.token_ids;
         m_draft->sync_generated_tokens(state.generated_tokens);
@@ -756,8 +785,7 @@ std::vector<EncodedGenerationResult> ContinuousBatchingPipeline::DFlashDecodingI
     auto start_time = std::chrono::steady_clock::now();
 
     auto streamer_ptr = std::make_shared<ThreadedStreamerWrapper>(streamer, m_tokenizer);
-    OPENVINO_ASSERT(!streamer_ptr->has_callback() ||
-                        (input_ids.size() == 1 && sampling_params[0].is_greedy_decoding()),
+    OPENVINO_ASSERT(!streamer_ptr->has_callback() || (input_ids.size() == 1 && sampling_params[0].is_greedy_decoding()),
                     "DFlash CB/PA streaming only supports batch size=1 with greedy decoding.");
 
     std::vector<GenerationHandle> main_generations;
@@ -769,7 +797,8 @@ std::vector<EncodedGenerationResult> ContinuousBatchingPipeline::DFlashDecodingI
             m_inputs_embedder->set_rope_delta(rope_delta.value_or(compute_rope_delta(main_position_ids)));
         }
         const bool has_valid_prompt_ids = prompt_ids.has_value() && request_id < prompt_ids->size();
-        const bool has_valid_lm_extra_inputs = lm_extra_inputs_list.has_value() && request_id < lm_extra_inputs_list->size();
+        const bool has_valid_lm_extra_inputs =
+            lm_extra_inputs_list.has_value() && request_id < lm_extra_inputs_list->size();
         main_generations.push_back(add_request(
             request_id,
             input_ids[request_id],

@@ -16,6 +16,11 @@ namespace ov::genai {
 class Qwen3ASRDecoder {
 public:
     Qwen3ASRDecoder(const std::filesystem::path& models_path, const std::string& device, const ov::AnyMap& properties);
+    Qwen3ASRDecoder(const std::shared_ptr<ov::Model>& model,
+                    const std::shared_ptr<ov::Model>& embeddings,
+                    int64_t audio_token_id,
+                    const std::string& device,
+                    const ov::AnyMap& properties);
 
     EncodedResults generate(const ov::Tensor& input_ids,
                             const ov::Tensor& encoder_hidden_state,
@@ -29,6 +34,10 @@ public:
 private:
     InferRequest m_request;
     Sampler m_sampler;
+    InferRequest m_embeddings;
+    int64_t m_audio_token_id = -1;
+    size_t m_past = 0;
+    void prepare_gguf_inputs(const ov::Tensor& tokens, const ov::Tensor& audio);
 };
 
 }  // namespace ov::genai

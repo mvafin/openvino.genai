@@ -50,6 +50,8 @@ AudioEncoderConfig audio_encoder_config(const MmprojMetadata& meta) {
     AudioEncoderConfig config;
     if (projector == "lfm2a") {
         config.type = AudioEncoderType::LFM2;
+    } else if (projector == "qwen3a") {
+        config.type = AudioEncoderType::QWEN3;
     } else if (projector == "gemma4ua") {
         config.type = AudioEncoderType::GEMMA4_UNIFIED;
     } else {
@@ -102,9 +104,23 @@ Configs gguf_configs(const std::string& architecture,
         c.video = c.image;
         return c;
     }
-    if (architecture == "gemma3") {
+    if (projector == "minicpmv4_7") {
         const auto size = meta.integer("clip.vision.image_size");
-        c.config["model_type"] = "gemma3";
+        const auto merge = meta.integer("vision.merge");
+        c.config["model_type"] = "minicpmv4_7";
+        c.config["position_ids_offset"] = 0;
+        c.config["vision_config"]["image_size"] = size;
+        c.config["vision_config"]["window_kernel_size"] = {merge == 4 ? 2 : 1};
+        c.config["merge_kernel_size"] = {2};
+        c.image["image_size"] = size;
+        c.image["scale_resolution"] = size;
+        c.image["max_slice_nums"] = 9;
+        c.video = c.image;
+        return c;
+    }
+    if (architecture == "gemma3" || architecture == "gemma3n") {
+        const auto size = meta.integer("clip.vision.image_size");
+        c.config["model_type"] = architecture;
         c.config["position_ids_offset"] = 0;
         c.config["image_separator"] = "";
         c.image["pad_to_target"] = true;
@@ -145,7 +161,20 @@ Configs gguf_configs(const std::string& architecture,
         c.video["max_video_frame_tokens"] = 4096;
         return c;
     }
-    c.config["model_type"] = architecture == "qwen35moe" ? "qwen3_5_moe" : "qwen3_5";
+    const bool qwen3vl = architecture == "qwen3vl" || architecture == "qwen3vlmoe";
+    c.config["model_type"] = qwen3vl ? "qwen3_vl" : architecture == "qwen35moe" ? "qwen3_5_moe" : "qwen3_5";
+    if (qwen3vl) {
+        const auto merger = models.vlm.find("vision_embeddings_merger");
+        OPENVINO_ASSERT(merger, "GGUF Qwen3VL requires a vision merger");
+        const auto features = merger->output("deepstack_feature_lists");
+        OPENVINO_ASSERT(features.get_partial_shape().rank() == 3 && features.get_partial_shape()[0].is_static(),
+                        "GGUF Qwen3VL requires a fixed number of DeepStack layers");
+        const auto count = features.get_partial_shape()[0].get_length();
+        auto& indexes = c.config["vision_config"]["deepstack_visual_indexes"];
+        indexes = json::array();
+        for (int64_t i = 0; i < count; ++i)
+            indexes.push_back(i);
+    }
     const auto side = meta.integer("clip.vision.image_size") / patch;
     c.config["vision_config"]["num_position_embeddings"] = side * side;
     c.image["temporal_patch_size"] = 2;
@@ -180,11 +209,15 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     const bool lfm_audio =
         architecture == "lfm2" && meta.has("audio.projector") && meta.text("audio.projector") == "lfm2a";
     const auto projector = lfm_audio ? meta.text("audio.projector") : meta.text("vision.projector");
+    const bool minicpm = (architecture == "qwen35" || architecture == "qwen35moe") && projector == "minicpmv4_7";
+    const bool gemma3n = architecture == "gemma3n" && projector == "gemma3nv";
     const bool gemma4 = architecture == "gemma4" && (projector == "gemma4v" || projector == "gemma4uv");
     OPENVINO_ASSERT((architecture == "gemma3" && projector == "gemma3") ||
-                        ((architecture == "qwen35" || architecture == "qwen35moe") && projector == "qwen3vl_merger") ||
-                        (architecture == "muse-glimmer" && projector == "muse-glimmer") || gemma4 || lfm_audio ||
-                        (architecture == "lfm2" && projector == "lfm2"),
+                        ((architecture == "qwen35" || architecture == "qwen35moe" || architecture == "qwen3vl" ||
+                          architecture == "qwen3vlmoe") &&
+                         projector == "qwen3vl_merger") ||
+                        (architecture == "muse-glimmer" && projector == "muse-glimmer") || gemma4 || gemma3n ||
+                        minicpm || lfm_audio || (architecture == "lfm2" && projector == "lfm2"),
                     "Unsupported GGUF language/projector pair: ",
                     architecture,
                     " / ",
@@ -198,7 +231,9 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
         vision_adapter.run_on_model(vision);
         vlm.models = vision_adapter.get_vision_models();
     }
-    if ((gemma4 || lfm_audio) && meta.has("audio.projector")) {
+    const bool omni =
+        architecture == "qwen3vlmoe" && meta.has("audio.projector") && meta.text("audio.projector") == "qwen3a";
+    if ((gemma4 || lfm_audio || omni) && meta.has("audio.projector")) {
         auto audio = combined->clone();
         Adapter(Adapter::Modality::AUDIO).run_on_model(audio);
         vlm.models["audio_embeddings"] = audio;
@@ -210,6 +245,19 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
 
     const auto configs = gguf_configs(architecture, projector, meta, result);
     vlm.config = VLMConfig(configs.config);
+    if (omni) {
+        vlm.config.model_type = VLMModelType::QWEN3_OMNI;
+        vlm.config.audio_config_num_mel_bins = meta.integer("clip.audio.num_mel_bins");
+        const auto vocabulary = result.tokenizer.get_vocab();
+        const auto id = [&](const std::string& token) {
+            const auto it = vocabulary.find(token);
+            OPENVINO_ASSERT(it != vocabulary.end(), "GGUF Omni vocabulary lacks ", token);
+            return it->second;
+        };
+        vlm.config.audio_token_id = id("<|audio_pad|>");
+        vlm.config.image_token_id = id("<|image_pad|>");
+        vlm.config.video_token_id = id("<|video_pad|>");
+    }
     vlm.processor_config = ProcessorConfig(configs.image);
     vlm.video_processor_config = VideoProcessorConfig(configs.video);
     if (architecture == "gemma3") {

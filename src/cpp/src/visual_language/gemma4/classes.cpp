@@ -511,8 +511,8 @@ NormalizedPrompt InputsEmbedderGemma4::normalize_prompt(const std::string& promp
                                                         const std::vector<ov::genai::EncodedAudio>& audios) const {
     auto result = normalize_prompt(prompt, base_image_id, base_video_id, images, videos);
     // Runs even without audios so that a stray <ov_genai_audio_N> is rejected.
-    std::tie(result.unified_prompt, result.audios_sequence) = normalize(
-        result.unified_prompt, AUDIO_TOKEN, AUDIO_TOKEN, base_audio_id, audios.size(), ModalityType::AUDIO);
+    std::tie(result.unified_prompt, result.audios_sequence) =
+        normalize(result.unified_prompt, AUDIO_TOKEN, AUDIO_TOKEN, base_audio_id, audios.size(), ModalityType::AUDIO);
     // Grow each single placeholder to the encoder's token count, wrapped in the audio markers.
     size_t search_offset = 0;
     for (size_t audio_id : result.audios_sequence) {
@@ -627,8 +627,7 @@ ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(
     bool recalculate_merged_embeddings,
     const std::vector<size_t>& images_sequence,
     const std::vector<size_t>& videos_sequence,
-    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count
-) {
+    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) {
     return get_inputs_embeds(prompt,
                              images,
                              videos,
@@ -651,8 +650,7 @@ ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(
     const std::vector<size_t>& images_sequence,
     const std::vector<size_t>& videos_sequence,
     const std::vector<size_t>& audios_sequence,
-    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count
-) {
+    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) {
     std::vector<ov::Tensor> image_embeds;
     image_embeds.reserve(images_sequence.size());
     for (size_t new_image_id : images_sequence) {

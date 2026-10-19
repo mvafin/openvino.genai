@@ -91,6 +91,10 @@ private:
 /// @brief InputsEmbedder for Qwen3-Omni. Extends Qwen3-VL with audio encoding support.
 class InputsEmbedderQwen3Omni : public InputsEmbedderQwen3VL {
 public:
+    InputsEmbedderQwen3Omni(const VLMModels& models,
+                            const Tokenizer& tokenizer,
+                            const std::string& device,
+                            const ov::AnyMap& properties);
     InputsEmbedderQwen3Omni(const VLMConfig& vlm_config,
                             const std::filesystem::path& model_dir,
                             const Tokenizer& tokenizer,
@@ -107,24 +111,24 @@ public:
     using InputsEmbedderQwen3VL::get_inputs_embeds;
 
     /// @brief Audio-aware overload. Places each audio at its own placeholder run.
-    ov::Tensor get_inputs_embeds(
-        const std::string& prompt,
-        const std::vector<ov::genai::EncodedImage>& images,
-        const std::vector<ov::genai::EncodedVideo>& videos,
-        const std::vector<ov::genai::EncodedAudio>& audios,
-        ov::genai::VLMPerfMetrics& metrics,
-        bool recalculate_merged_embeddings,
-        const std::vector<size_t>& image_sequence,
-        const std::vector<size_t>& videos_sequence,
-        const std::vector<size_t>& audios_sequence,
-        const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) override;
+    ov::Tensor get_inputs_embeds(const std::string& prompt,
+                                 const std::vector<ov::genai::EncodedImage>& images,
+                                 const std::vector<ov::genai::EncodedVideo>& videos,
+                                 const std::vector<ov::genai::EncodedAudio>& audios,
+                                 ov::genai::VLMPerfMetrics& metrics,
+                                 bool recalculate_merged_embeddings,
+                                 const std::vector<size_t>& image_sequence,
+                                 const std::vector<size_t>& videos_sequence,
+                                 const std::vector<size_t>& audios_sequence,
+                                 const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) override;
 
     /// @brief Encode each audio independently. Pure — the result is passed back in explicitly.
     std::vector<ov::genai::EncodedAudio> encode_audios(const std::vector<ov::Tensor>& audios) override;
 
     /// @brief Check if audio encoder model was loaded and is ready for inference.
     bool has_audio_encoder() const {
-        return m_audio_encoder != nullptr && m_audio_encoder->is_available();
+        return (m_audio_encoder != nullptr && m_audio_encoder->is_available()) ||
+               bool(IInputsEmbedder::m_audio_encoder);
     }
 
     NormalizedPrompt normalize_prompt(const std::string& prompt,
@@ -175,8 +179,7 @@ protected:
         const std::vector<size_t>& videos_sequence,
         const size_t video_id,
         const int64_t vision_start_token_id,
-        const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count
-    ) override;
+        const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) override;
 
     std::pair<ov::Tensor, std::optional<int64_t>> get_generation_phase_position_ids(const size_t inputs_embeds_size,
                                                                                     const size_t history_size,

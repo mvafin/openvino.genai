@@ -189,9 +189,8 @@ py::object call_text2speech_common_generate(Text2SpeechPipeline& pipe,
         generation_config.has_value() ? generation_config : pipe.get_generation_config();
     const std::optional<SpeechGenerationConfig> updated_config =
         update_speech_generation_config_from_kwargs(base_config, kwargs);
-    const ov::Tensor speaker_embedding_tensor = speaker_embedding.is_none() ?
-                                                ov::Tensor() :
-                                                speaker_embedding.cast<ov::Tensor>();
+    const ov::Tensor speaker_embedding_tensor =
+        speaker_embedding.is_none() ? ov::Tensor() : speaker_embedding.cast<ov::Tensor>();
 
     ov::genai::Text2SpeechDecodedResults res;
     {
@@ -274,12 +273,11 @@ void init_speech_generation_pipeline(py::module_& m) {
                py::object speaker_embedding,
                const std::optional<SpeechGenerationConfig>& generation_config,
                const py::kwargs& kwargs) -> py::typing::Union<ov::genai::Text2SpeechDecodedResults> {
-                return call_text2speech_common_generate(
-                    pipe,
-                    std::vector<std::string>{text},
-                    speaker_embedding,
-                    generation_config,
-                    kwargs);
+                return call_text2speech_common_generate(pipe,
+                                                        std::vector<std::string>{text},
+                                                        speaker_embedding,
+                                                        generation_config,
+                                                        kwargs);
             },
             py::arg("text"),
             "input text for which to generate speech.",
@@ -308,8 +306,9 @@ void init_speech_generation_pipeline(py::module_& m) {
 
         .def("get_generation_config", &Text2SpeechPipeline::get_generation_config, py::return_value_policy::copy)
         .def("set_generation_config", &Text2SpeechPipeline::set_generation_config, py::arg("config"))
-        .def("get_speaker_embedding_shape", &Text2SpeechPipeline::get_speaker_embedding_shape,
+        .def("get_speaker_embedding_shape",
+             &Text2SpeechPipeline::get_speaker_embedding_shape,
              "Get the expected speaker embedding shape for the loaded model. "
-               "SpeechT5: Shape{1, 512}. Kokoro: Shape{510, 1, 256}. "
-               "Qwen3 Base: Shape{1, 1, D}.");
+             "SpeechT5: Shape{1, 512}. Kokoro: Shape{510, 1, 256}. "
+             "Qwen3 Base: Shape{1, 1, D}.");
 }

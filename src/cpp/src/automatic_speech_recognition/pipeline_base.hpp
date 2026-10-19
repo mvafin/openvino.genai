@@ -20,6 +20,8 @@ public:
         : m_generation_config(utils::from_config_json_if_exists<ASRGenerationConfig>(models_path)),
           m_tokenizer{models_path} {}
 
+    ASRPipelineImplBase(const Tokenizer& tokenizer) : m_tokenizer(tokenizer) {}
+
     virtual ASRDecodedResults generate(const AudioInputs& audio_inputs,
                                        const std::optional<ASRGenerationConfig>& generation_config,
                                        const std::shared_ptr<StreamerBase> streamer) = 0;
