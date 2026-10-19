@@ -62,6 +62,17 @@ public:
         const std::vector<size_t>& videos_sequence = {},
         const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count = {}) override;
 
+    ov::Tensor get_inputs_embeds(const std::string& prompt,
+                                 const std::vector<ov::genai::EncodedImage>& images,
+                                 const std::vector<ov::genai::EncodedVideo>& videos,
+                                 const std::vector<ov::genai::EncodedAudio>& audios,
+                                 ov::genai::VLMPerfMetrics& metrics,
+                                 bool recalculate_merged_embeddings,
+                                 const std::vector<size_t>& image_sequence,
+                                 const std::vector<size_t>& videos_sequence,
+                                 const std::vector<size_t>& audios_sequence,
+                                 const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) override;
+
     std::vector<ov::genai::EncodedImage> encode_images(const std::vector<ov::Tensor>& images) override;
     /// @brief Encode each audio independently; the result is passed back in explicitly.
     std::vector<ov::genai::EncodedAudio> encode_audios(const std::vector<ov::Tensor>& audios) override;
@@ -83,6 +94,7 @@ public:
 
     std::vector<ov::genai::EncodedVideo> encode_videos(const std::vector<ov::Tensor>& videos,
                                                        const std::vector<VideoMetadata>& videos_metadata = {}) override;
+
 
     NormalizedPrompt normalize_prompt(const std::string& prompt,
                                       size_t base_id,
@@ -128,6 +140,8 @@ private:
                                      const std::vector<EncodedVideo>& encoded_videos,
                                      const std::vector<size_t>& videos_sequence,
                                      size_t video_base_id) const;
+
+
 
     ov::Tensor get_per_layer_embeddings(const ov::Tensor& input_ids);
 
