@@ -121,6 +121,10 @@ repeated single-request PA generation.
 
 Qwen3TTS's GGUF subtalker accepts temperature 1, top-k 50, top-p 1 and sampling.
 Its public pipeline has passed repeated finite-PCM generation and exact seeded reset.
+An installed CPU build of Qwen3-ASR Q8_0 transcribed two pinned LibriSpeech dummy
+validation clips with one word error across 27 reference words (3.7% WER), exact
+repeated output and cancellation/reset through `StreamerBase`. This is a small quality
+smoke check. The C, C++ and Python libraries also build against a clean OpenVINO installation.
 Real quantized ASR/TTS parity, Gemma3n's original numerical gate, broader draft
 acceptance, Omni audio preprocessing and full media/configuration matrices remain
 outstanding. See the companion frontend's supported-model and mmproj documentation
