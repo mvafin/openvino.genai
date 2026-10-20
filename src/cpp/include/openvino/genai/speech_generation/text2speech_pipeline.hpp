@@ -70,8 +70,8 @@ public:
      * `Text2SpeechDecodedResults::output_sample_rate`
      */
     Text2SpeechDecodedResults generate(const std::string& text,
-                                       const ov::Tensor& speaker_embedding,
-                                       const ov::AnyMap& properties) {
+                                       const ov::Tensor& speaker_embedding = ov::Tensor(),
+                                       const ov::AnyMap& properties = {}) {
         return generate(std::vector<std::string>{text}, speaker_embedding, properties);
     }
 
@@ -85,10 +85,11 @@ public:
      * @returns raw audios of the input texts spoken in the specified speaker's voice; sample rate is provided in
      * `Text2SpeechDecodedResults::output_sample_rate`
      */
-    Text2SpeechDecodedResults generate(const std::string& text,
-                                       const ov::Tensor& speaker_embedding = ov::Tensor(),
-                                       const std::optional<SpeechGenerationConfig>& generation_config = std::nullopt) {
-        return generate(std::vector<std::string>{text}, speaker_embedding, generation_config);
+    Text2SpeechDecodedResults generate_with_config(
+        const std::string& text,
+        const ov::Tensor& speaker_embedding = ov::Tensor(),
+        const std::optional<SpeechGenerationConfig>& generation_config = std::nullopt) {
+        return generate_with_config(std::vector<std::string>{text}, speaker_embedding, generation_config);
     }
 
     /**
@@ -102,8 +103,8 @@ public:
      * `Text2SpeechDecodedResults::output_sample_rate`
      */
     Text2SpeechDecodedResults generate(const std::vector<std::string>& texts,
-                                       const ov::Tensor& speaker_embedding,
-                                       const ov::AnyMap& properties);
+                                       const ov::Tensor& speaker_embedding = ov::Tensor(),
+                                       const ov::AnyMap& properties = {});
 
     /**
      * Generates speeches based on input texts
@@ -115,9 +116,10 @@ public:
      * @returns raw audios of the input texts spoken in the specified speaker's voice; sample rate is provided in
      * `Text2SpeechDecodedResults::output_sample_rate`
      */
-    Text2SpeechDecodedResults generate(const std::vector<std::string>& texts,
-                                       const ov::Tensor& speaker_embedding = ov::Tensor(),
-                                       const std::optional<SpeechGenerationConfig>& generation_config = std::nullopt);
+    Text2SpeechDecodedResults generate_with_config(
+        const std::vector<std::string>& texts,
+        const ov::Tensor& speaker_embedding = ov::Tensor(),
+        const std::optional<SpeechGenerationConfig>& generation_config = std::nullopt);
 
     template <typename... Properties,
               typename std::enable_if<ov::util::StringAny<Properties...>::value, bool>::type = true>

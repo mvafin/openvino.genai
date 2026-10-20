@@ -7,7 +7,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-import subprocess
+import subprocess  # nosec B404: fixed git argument list, without a shell
 
 import numpy as np
 import torch

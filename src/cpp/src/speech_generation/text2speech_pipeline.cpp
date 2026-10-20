@@ -116,7 +116,7 @@ Text2SpeechDecodedResults Text2SpeechPipeline::generate(const std::vector<std::s
     return m_impl->generate(texts, speaker_embedding, request_config);
 }
 
-Text2SpeechDecodedResults Text2SpeechPipeline::generate(
+Text2SpeechDecodedResults Text2SpeechPipeline::generate_with_config(
     const std::vector<std::string>& texts,
     const ov::Tensor& speaker_embedding,
     const std::optional<SpeechGenerationConfig>& generation_config) {

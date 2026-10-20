@@ -6,10 +6,9 @@
 #include <cstdarg>
 #include <cstring>
 #include <filesystem>
-#include <vector>
-
 #include <openvino/runtime/remote_tensor.hpp>
 #include <openvino/runtime/tensor.hpp>
+#include <vector>
 
 #include "types_c.h"
 
@@ -109,10 +108,10 @@ ov_status_e ov_genai_text2speech_pipeline_generate_batch(ov_genai_text2speech_pi
         if (config && config->object) {
             config->object->validate();
             result->object = std::make_shared<ov::genai::Text2SpeechDecodedResults>(
-                pipeline->object->generate(inputs, embedding, *config->object));
+                pipeline->object->generate_with_config(inputs, embedding, *config->object));
         } else {
-            result->object = std::make_shared<ov::genai::Text2SpeechDecodedResults>(
-                pipeline->object->generate(inputs, embedding));
+            result->object =
+                std::make_shared<ov::genai::Text2SpeechDecodedResults>(pipeline->object->generate(inputs, embedding));
         }
         *results = result.release();
         return ov_status_e::OK;

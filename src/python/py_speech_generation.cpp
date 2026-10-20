@@ -195,7 +195,7 @@ py::object call_text2speech_common_generate(Text2SpeechPipeline& pipe,
     ov::genai::Text2SpeechDecodedResults res;
     {
         py::gil_scoped_release rel;
-        res = pipe.generate(texts, speaker_embedding_tensor, updated_config);
+        res = pipe.generate_with_config(texts, speaker_embedding_tensor, updated_config);
     }
     return py::cast(res);
 }
