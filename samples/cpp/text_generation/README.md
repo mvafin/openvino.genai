@@ -28,10 +28,37 @@ hf download <model> --local-dir <output_folder>
 To run any samples with a GGUF model, simply provide the path to the .gguf file via the `<MODEL_DIR>` parameter.
 
 The default legacy reader handles `llama`, `qwen2`, and `qwen3`, and ignores some metadata,
-such as `rope_freqs.weight`. The OpenVINO GGUF frontend supports more architectures and is
-expected to provide better model quality, but is in preview and may have limitations.
+such as `rope_freqs.weight`. The OpenVINO GGUF frontend supports additional architectures
+and preserves their model and multimodal contracts.
 
-Prefer models quantized in `Q4_0` or `Q8_0` format for better performance and accuracy. Their quantization layouts are closest to those used by OpenVINO.
+For the families added in the companion OpenVINO PR, support is limited to validated
+formats on CPU. AFMoE requires F32 tensors. MiniCPM-V 4.7 requires an F32 projector
+with its existing `qwen35` decoder. Qwen3-ASR supports the original BF16 decoder with
+an F32 `qwen3a` projector; the original Q8_0 decoder requires
+`DYNAMIC_QUANTIZATION_GROUP_SIZE=32`. Qwen3TTS requires F32 decoder and combined
+speaker/predictor/codec projector tensors; seeded zero-speaker generation was checked,
+while speech quality and voice cloning remain unassessed. Their original
+quantized/BF16 projector files fail the feature checks. Use `GGUF_READER="FRONTEND"` and consult the
+[OpenVINO format and checkpoint limits](https://github.com/openvinotoolkit/openvino/pull/39000).
+
+Qwen3-Omni is limited to the validated mixed F16/F32 decoder and F32 combined
+projector. Native SDPA/PA text generation is validated. For image and audio inputs,
+use PA with bounded prefill chunks; unchunked media prefill exceeded the RAM guard.
+The tested single-request configuration is:
+
+```python
+scheduler = openvino_genai.SchedulerConfig()
+scheduler.max_num_batched_tokens = 16
+scheduler.dynamic_split_fuse = True
+scheduler.max_num_seqs = 1
+scheduler.enable_prefix_caching = False
+pipeline = openvino_genai.VLMPipeline(
+    decoder_path, "CPU", mmproj_path=projector_path,
+    GGUF_READER="FRONTEND", ATTENTION_BACKEND="PA", scheduler_config=scheduler,
+    INFERENCE_PRECISION_HINT="f32", KV_CACHE_PRECISION="f16",
+    DYNAMIC_QUANTIZATION_GROUP_SIZE=0,
+)
+```
 
 Select the frontend when constructing the pipeline:
 
