@@ -15,6 +15,22 @@
 #include "openvino/genai/gguf.hpp"
 
 namespace ov::genai {
+std::vector<size_t> gguf_qwen3vl_deepstack_visual_indexes(const std::shared_ptr<ov::Model>& merger) {
+    OPENVINO_ASSERT(merger, "GGUF Qwen3VL requires a vision merger");
+    std::vector<size_t> indexes;
+    for (const auto& output : merger->outputs()) {
+        if (!output.get_names().count("deepstack_feature_lists"))
+            continue;
+        const auto& shape = output.get_partial_shape();
+        OPENVINO_ASSERT(shape.rank() == 3 && shape[0].is_static(),
+                        "GGUF Qwen3VL requires a fixed number of DeepStack layers");
+        for (int64_t i = 0; i < shape[0].get_length(); ++i)
+            indexes.push_back(i);
+        break;
+    }
+    return indexes;
+}
+
 namespace {
 using nlohmann::json;
 
@@ -106,6 +122,8 @@ Configs gguf_configs(const std::string& architecture,
     }
     if (projector == "minicpmv4_7") {
         const auto size = meta.integer("clip.vision.image_size");
+        const auto position_grid = meta.integer("vision.position_grid_size", size / patch);
+        OPENVINO_ASSERT(position_grid > 0, "GGUF MiniCPM requires a positive vision position grid size");
         const auto merge = meta.integer("vision.merge");
         c.config["model_type"] = "minicpmv4_7";
         c.config["position_ids_offset"] = 0;
@@ -114,7 +132,7 @@ Configs gguf_configs(const std::string& architecture,
                             position_shape[0].is_static(),
                         "MiniCPM language position_ids must have a static section count");
         c.config["position_ids_sections"] = position_shape[0].get_length();
-        c.config["vision_config"]["image_size"] = size;
+        c.config["vision_config"]["image_size"] = position_grid * patch;
         c.config["vision_config"]["window_kernel_size"] = {merge == 4 ? 2 : 1};
         c.config["merge_kernel_size"] = {2};
         c.image["image_size"] = size;
@@ -169,16 +187,8 @@ Configs gguf_configs(const std::string& architecture,
     const bool qwen3vl = architecture == "qwen3vl" || architecture == "qwen3vlmoe";
     c.config["model_type"] = qwen3vl ? "qwen3_vl" : architecture == "qwen35moe" ? "qwen3_5_moe" : "qwen3_5";
     if (qwen3vl) {
-        const auto merger = models.vlm.find("vision_embeddings_merger");
-        OPENVINO_ASSERT(merger, "GGUF Qwen3VL requires a vision merger");
-        const auto features = merger->output("deepstack_feature_lists");
-        OPENVINO_ASSERT(features.get_partial_shape().rank() == 3 && features.get_partial_shape()[0].is_static(),
-                        "GGUF Qwen3VL requires a fixed number of DeepStack layers");
-        const auto count = features.get_partial_shape()[0].get_length();
-        auto& indexes = c.config["vision_config"]["deepstack_visual_indexes"];
-        indexes = json::array();
-        for (int64_t i = 0; i < count; ++i)
-            indexes.push_back(i);
+        c.config["vision_config"]["deepstack_visual_indexes"] =
+            gguf_qwen3vl_deepstack_visual_indexes(models.vlm.find("vision_embeddings_merger"));
     }
     const auto side = meta.integer("clip.vision.image_size") / patch;
     c.config["vision_config"]["num_position_embeddings"] = side * side;
@@ -205,18 +215,27 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     result.language->set_rt_info(ov::element::f16, {"runtime_options", ov::hint::kv_cache_precision.name()});
     auto tokenizer_metadata = take_gguf_tokenizer_metadata(result.language);
     result.stop_token_ids = gguf_stop_token_ids(tokenizer_metadata);
-    result.tokenizer = GGUFTokenizer(GGUFTokenizerParameters(std::move(tokenizer_metadata)), properties);
+    const auto architecture = result.language->get_rt_info<std::string>("gguf_architecture");
+    const auto vocabulary_id = [&](const std::string& token) -> int64_t {
+        const auto& vocabulary = tokenizer_metadata.at("tokens").as<std::vector<std::string>>();
+        const auto entry = std::find(vocabulary.begin(), vocabulary.end(), token);
+        OPENVINO_ASSERT(entry != vocabulary.end(), "GGUF ", architecture, " vocabulary lacks ", token);
+        return std::distance(vocabulary.begin(), entry);
+    };
+    const auto image_placeholder_id =
+        architecture == "gemma3" || architecture == "gemma3n" ? vocabulary_id("<pad>") : -1;
     gguf::FrontEnd projector_frontend;
     register_gguf_extensions(projector_frontend, extensions);
     auto combined = projector_frontend.convert(projector_frontend.load(mmproj.string()));
     const MmprojMetadata meta(combined);
-    const auto architecture = result.language->get_rt_info<std::string>("gguf_architecture");
     const bool lfm_audio =
         architecture == "lfm2" && meta.has("audio.projector") && meta.text("audio.projector") == "lfm2a";
     const auto projector = lfm_audio ? meta.text("audio.projector") : meta.text("vision.projector");
     const bool minicpm = (architecture == "qwen35" || architecture == "qwen35moe") && projector == "minicpmv4_7";
     const bool gemma3n = architecture == "gemma3n" && projector == "gemma3nv";
     const bool gemma4 = architecture == "gemma4" && (projector == "gemma4v" || projector == "gemma4uv");
+    const bool omni =
+        architecture == "qwen3vlmoe" && meta.has("audio.projector") && meta.text("audio.projector") == "qwen3a";
     OPENVINO_ASSERT((architecture == "gemma3" && projector == "gemma3") ||
                         ((architecture == "qwen35" || architecture == "qwen35moe" || architecture == "qwen3vl" ||
                           architecture == "qwen3vlmoe") &&
@@ -227,6 +246,10 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
                     architecture,
                     " / ",
                     projector);
+    const auto omni_audio_token_id = omni ? vocabulary_id("<|audio_pad|>") : -1;
+    const auto omni_image_token_id = omni ? vocabulary_id("<|image_pad|>") : -1;
+    const auto omni_video_token_id = omni ? vocabulary_id("<|video_pad|>") : -1;
+    result.tokenizer = GGUFTokenizer(GGUFTokenizerParameters(std::move(tokenizer_metadata)), properties);
 
     auto& vlm = result.vlm;
     using Adapter = gguf::pass::AdaptMmprojToGenAI;
@@ -236,8 +259,6 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
         vision_adapter.run_on_model(vision);
         vlm.models = vision_adapter.get_vision_models();
     }
-    const bool omni =
-        architecture == "qwen3vlmoe" && meta.has("audio.projector") && meta.text("audio.projector") == "qwen3a";
     if ((gemma4 || lfm_audio || omni) && meta.has("audio.projector")) {
         auto audio = combined->clone();
         Adapter(Adapter::Modality::AUDIO).run_on_model(audio);
@@ -251,26 +272,29 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     const auto configs = gguf_configs(architecture, projector, meta, result);
     vlm.config = VLMConfig(configs.config);
     if (omni) {
+        const auto& position_shape = result.language->input("position_ids").get_partial_shape();
+        OPENVINO_ASSERT(position_shape.rank().is_static() && position_shape.rank().get_length() == 3 &&
+                            position_shape[0].is_static(),
+                        "GGUF Omni language position_ids must have a static section count");
+        vlm.config.position_ids_sections = position_shape[0].get_length();
+        OPENVINO_ASSERT(vlm.config.position_ids_sections == 3 || vlm.config.position_ids_sections == 4,
+                        "GGUF Omni position_ids must have three or four sections");
         vlm.config.model_type = VLMModelType::QWEN3_OMNI;
         vlm.config.audio_config_num_mel_bins = meta.integer("clip.audio.num_mel_bins");
-        const auto vocabulary = result.tokenizer.get_vocab();
-        const auto id = [&](const std::string& token) {
-            const auto it = vocabulary.find(token);
-            OPENVINO_ASSERT(it != vocabulary.end(), "GGUF Omni vocabulary lacks ", token);
-            return it->second;
-        };
-        vlm.config.audio_token_id = id("<|audio_pad|>");
-        vlm.config.image_token_id = id("<|image_pad|>");
-        vlm.config.video_token_id = id("<|video_pad|>");
+        vlm.config.audio_token_id = omni_audio_token_id;
+        vlm.config.image_token_id = omni_image_token_id;
+        vlm.config.video_token_id = omni_video_token_id;
     }
     vlm.processor_config = ProcessorConfig(configs.image);
     vlm.video_processor_config = VideoProcessorConfig(configs.video);
-    if (architecture == "gemma3") {
-        // GGUF Gemma3 vocabularies lack <image_soft_token>; <pad> only marks image positions.
+    if (architecture == "gemma3" || gemma3n) {
         vlm.config.image_soft_token = "<pad>";
         const auto placeholder = result.tokenizer.encode(vlm.config.image_soft_token, add_special_tokens(false));
-        OPENVINO_ASSERT(placeholder.input_ids.get_size() == 1,
-                        "GGUF Gemma3 requires a single-token padding placeholder for image assembly");
+        OPENVINO_ASSERT(placeholder.input_ids.get_size() == 1 &&
+                            placeholder.input_ids.data<const int64_t>()[0] == image_placeholder_id,
+                        "GGUF ",
+                        architecture,
+                        " requires a single-token padding placeholder for image assembly");
     }
     return result;
 }

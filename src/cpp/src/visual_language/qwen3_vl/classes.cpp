@@ -370,6 +370,8 @@ InputsEmbedderQwen3VL::InputsEmbedderQwen3VL(const VLMModels& models,
                                              const ov::AnyMap& properties)
     : InputsEmbedderQwen2VL(models, tokenizer, device, properties),
       m_use_patched_pos_model(!is_cpp_pos_embeds_fallback_requested()) {
+    if (models.config.vision_config_deepstack_visual_indexes.empty())
+        m_lm_extra_inputs.clear();
     compile_pos_model(models.at("vision_embeddings_pos"), device, properties);
 }
 

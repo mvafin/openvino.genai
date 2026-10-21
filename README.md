@@ -121,12 +121,21 @@ repeated single-request PA generation. The unfinished DeepSeek-V4 DFlash backbon
 multiple-active-request support are deferred to a follow-up PR.
 
 MiniCPM-V4.7's 1B Q4_K_M decoder and matching 4x projector run repeated image generation
-with SDPA and PA. The GGUF consumer supplies the decoder's four-section positions while
-the Optimum path retains three sections. Both backends agree on the tested real image,
-but its headline transcription is incorrect; this does not establish image quality.
-The original projector also fails its full-feature numerical parity gate. Gemma3n's
-vision-only diagnostic passes full-feature parity and repeated SDPA/PA generation;
-the original combined projector is rejected because `gemma3na` audio is unsupported.
+with SDPA and PA. The GGUF consumer preserves the learned 70x70 position grid separately
+from the 448-pixel processor resize and supplies four-section decoder positions; the
+Optimum path retains three sections. Gemma3n inserts its single GGUF `<pad>` image token,
+including per-layer embedding spans. Both models now identify the gray tabby in a pinned
+cat/cardboard-box image with exact repeats and matching SDPA/PA output. A 64-token PA
+check names the box for Gemma3n; MiniCPM's object description is truncated after "open
+cardboard". This small check does not establish broad image quality or numerical parity.
+MiniCPM's original projector fails full-feature parity. Gemma3n's vision-only diagnostic
+passes that gate, while its original combined projector rejects unsupported `gemma3na` audio.
+
+Original Cohere2 and AFMoE text APIs repeat deterministically. AFMoE's SDPA/PA outputs
+match; Cohere2's differ. Qwen3-Omni's original text APIs repeat and agree between backends,
+but its decoder replay matches 11/13 and fails the 90% gate, as does original AFMoE.
+The canonical Qwen3Next checkpoint attempt is resource-blocked by a 16 GiB available-RAM
+guard before frontend execution completes; its APIs remain unrun.
 
 Qwen3TTS's GGUF subtalker accepts temperature 1, top-k 50, top-p 1 and sampling.
 Its public pipeline has passed repeated finite-PCM generation and exact seeded repeat.
@@ -137,6 +146,14 @@ validation clips with one word error across 27 reference words (3.7% WER), exact
 repeated output and cancellation/reset through `StreamerBase`. This is a small quality
 smoke check. The C, C++ and Python libraries also build against a clean OpenVINO installation.
 Real quantized ASR/TTS parity, Gemma3n checkpoint parity, broader draft
-acceptance, Omni audio preprocessing and full media/configuration matrices remain
+acceptance and full media/configuration matrices remain
 outstanding. See the companion frontend's supported-model and mmproj documentation
 for the exact implemented contracts and validation limitations.
+
+Original Qwen3-Omni-30B-A3B Q4_K_M and its combined Q8_0 projector pass four repeated
+CPU image/audio API cases with matching SDPA/PA outputs. In-memory GGUF loading uses
+optional DeepStack inputs, split vision models and the decoder's declared three position
+sections; exported-model Omni retains its four-section contract. The pinned image produces
+a gray tabby description, truncated before the box at 64 tokens. A pinned 16 kHz LibriSpeech
+clip is transcribed correctly, using "Mr." for the reference's "MISTER". These limited media
+checks do not waive the original decoder's failed numerical gate or establish broad quality.

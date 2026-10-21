@@ -167,9 +167,7 @@ protected:
     /// @brief Override to use merged vision model for rotary dim instead of separate merger.
     ov::Tensor get_rotary_pos_emb(const std::vector<std::array<size_t, 3>>& grids_thw) const override;
 
-    /// @brief Override Qwen2VL's create_position_ids to produce 4D position_ids for Qwen3-Omni's
-    /// multimodal RoPE (temporal, height, width, text). Plain Qwen3-VL uses the 3D variant from
-    /// Qwen2VL — only Omni's exported language model expects shape [4, batch, seq].
+    /// @brief Use the decoder's three or four position sections for multimodal RoPE.
     std::pair<ov::Tensor, int64_t> create_position_ids(
         const ov::Tensor& input_ids_tensor,
         const std::vector<std::array<size_t, 3>>& images_grid_thw,
@@ -195,6 +193,8 @@ private:
 
     // Merged vision model (patch_embed + transformer + merger)
     std::unique_ptr<CircularBufferQueue<ov::InferRequest>> m_ireq_queue_merged_vision;
+    bool m_use_split_vision = false;
+    size_t m_position_ids_sections = 4;
     // Cached rotary embedding dimension from merged vision model (avoids queue lock in get_rotary_pos_emb)
     size_t m_rotary_dim = 0;
     // True when the GPU SDPAToVLSDPA pass fired and the vision model now expects a packed

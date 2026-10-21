@@ -544,7 +544,12 @@ InputsEmbedderQwen3Omni::InputsEmbedderQwen3Omni(const VLMModels& models,
                                                  const ov::AnyMap& properties)
     : InputsEmbedderQwen3VL(models, tokenizer, device, properties),
       m_audio_token_id(models.config.audio_token_id),
-      m_tokenizer_encodes_audio_pad(encodes_audio_pad_as_single_token(m_tokenizer, m_audio_token_id)) {}
+      m_tokenizer_encodes_audio_pad(encodes_audio_pad_as_single_token(m_tokenizer, m_audio_token_id)),
+      m_use_split_vision(true),
+      m_position_ids_sections(models.config.position_ids_sections) {
+    OPENVINO_ASSERT(m_position_ids_sections == 3 || m_position_ids_sections == 4,
+                    "Omni position_ids must have three or four sections");
+}
 
 std::vector<ov::genai::EncodedAudio> InputsEmbedderQwen3Omni::encode_audios(const std::vector<ov::Tensor>& audios) {
     if (IInputsEmbedder::m_audio_encoder)
@@ -841,6 +846,13 @@ std::pair<ov::Tensor, ov::Tensor> InputsEmbedderQwen3Omni::run_video_image_embed
     const std::vector<size_t>& images_sequence,
     const std::vector<EncodedVideo>& videos,
     const std::vector<size_t>& videos_sequence) {
+    if (m_use_split_vision && !has_merged_vision_model()) {
+        OPENVINO_ASSERT(m_ireq_queue_vision_embeddings_merger, "Split vision merger not loaded");
+        return InputsEmbedderQwen3VL::run_video_image_embeddings_merger(images,
+                                                                        images_sequence,
+                                                                        videos,
+                                                                        videos_sequence);
+    }
     OPENVINO_ASSERT(has_merged_vision_model(),
                     "Merged vision model not loaded but images/videos were provided. "
                     "Ensure openvino_vision_embeddings_model.xml is present in the model directory.");
@@ -916,6 +928,10 @@ std::pair<ov::Tensor, ov::Tensor> InputsEmbedderQwen3Omni::run_video_image_embed
 }
 
 ov::Tensor InputsEmbedderQwen3Omni::get_rotary_pos_emb(const std::vector<std::array<size_t, 3>>& grids_thw) const {
+    if (m_use_split_vision && !has_merged_vision_model()) {
+        OPENVINO_ASSERT(m_ireq_queue_vision_embeddings_merger, "Split vision merger not loaded");
+        return InputsEmbedderQwen2VL::get_rotary_pos_emb(grids_thw);
+    }
     const auto spatial_merge_size = m_vision_encoder->get_processor_config().merge_size;
 
     std::vector<std::vector<size_t>> all_pos_ids;
@@ -999,6 +1015,16 @@ std::pair<ov::Tensor, int64_t> InputsEmbedderQwen3Omni::create_position_ids(
     const size_t video_id,
     const int64_t vision_start_token_id,
     const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) {
+    if (m_position_ids_sections == 3)
+        return InputsEmbedderQwen2VL::create_position_ids(input_ids_tensor,
+                                                          images_grid_thw,
+                                                          images_sequence,
+                                                          image_id,
+                                                          videos_grid_thw,
+                                                          videos_sequence,
+                                                          video_id,
+                                                          vision_start_token_id,
+                                                          history_vision_count);
     // Create 4D position_ids for Qwen3-Omni's multimodal RoPE: [temporal, height, width, text]
     const size_t spatial_merge_size = m_vision_encoder->get_processor_config().merge_size;
     const size_t tokens_per_second = m_vlm_config.vision_config_tokens_per_second;
@@ -1120,6 +1146,8 @@ std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderQwen3Omni::get_gener
     const size_t inputs_embeds_size,
     const size_t history_size,
     int64_t rope_delta) {
+    if (m_position_ids_sections == 3)
+        return InputsEmbedderQwen2VL::get_generation_phase_position_ids(inputs_embeds_size, history_size, rope_delta);
     OPENVINO_ASSERT(history_size != 0,
                     "get_generation_phase_position_ids() should only be called when history_size is non-zero.");
     // 4 dimensions for Qwen3-Omni's multimodal RoPE
