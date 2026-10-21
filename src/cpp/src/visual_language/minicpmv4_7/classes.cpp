@@ -18,6 +18,10 @@ namespace {
 const std::string NATIVE_TAG = "<image>./</image>";
 const std::string NATIVE_VIDEO_TAG = "<video>./</video>";
 
+void validate_position_ids_sections(const size_t sections) {
+    OPENVINO_ASSERT(sections == 3 || sections == 4, "MiniCPM position_ids must have three or four sections");
+}
+
 size_t calc_vision_downsample_factor(const size_t window_kernel_size, const size_t merge_kernel_size) {
     return window_kernel_size * merge_kernel_size;
 }
@@ -552,6 +556,7 @@ InputsEmbedderMiniCPMv4_7::InputsEmbedderMiniCPMv4_7(const VLMModels& models,
                                                      const std::string& device,
                                                      const ov::AnyMap& properties)
     : IInputsEmbedder(models, tokenizer, device, properties) {
+    validate_position_ids_sections(m_vlm_config.position_ids_sections);
     static_cast<VisionEncoderMiniCPMv4_7&>(*m_vision_encoder).update_vision_config(m_vlm_config);
 }
 
@@ -561,6 +566,7 @@ InputsEmbedderMiniCPMv4_7::InputsEmbedderMiniCPMv4_7(const VLMConfig& vlm_config
                                                      const std::string& device,
                                                      const ov::AnyMap device_config)
     : IInputsEmbedder(vlm_config, model_dir, tokenizer, device, device_config) {
+    validate_position_ids_sections(m_vlm_config.position_ids_sections);
     static_cast<VisionEncoderMiniCPMv4_7&>(*m_vision_encoder).update_vision_config(m_vlm_config);
 }
 
@@ -571,6 +577,7 @@ InputsEmbedderMiniCPMv4_7::InputsEmbedderMiniCPMv4_7(const VLMConfig& vlm_config
                                                      const std::string& device,
                                                      const ov::AnyMap device_config)
     : IInputsEmbedder(vlm_config, models_map, tokenizer, config_dir_path, device, device_config) {
+    validate_position_ids_sections(m_vlm_config.position_ids_sections);
     static_cast<VisionEncoderMiniCPMv4_7&>(*m_vision_encoder).update_vision_config(m_vlm_config);
 }
 
@@ -802,6 +809,22 @@ std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderMiniCPMv4_7::get_pos
     if (history_size != 0) {
         return get_generation_phase_position_ids(inputs_embeds_size, history_size, m_rope_delta);
     }
+    if (m_vlm_config.position_ids_sections == 4) {
+        const auto& shape = m_position_ids.get_shape();
+        OPENVINO_ASSERT(shape.size() == 3 && (shape[0] == 3 || shape[0] == 4),
+                        "MiniCPM position_ids must have three or four sections");
+        if (shape[0] == 4)
+            return {m_position_ids, m_rope_delta};
+        const size_t batch_size = shape[1];
+        const size_t seq_len = shape[2];
+        ov::Tensor position_ids{ov::element::i64, {4, batch_size, seq_len}};
+        int64_t* data = position_ids.data<int64_t>();
+        for (size_t batch = 0; batch < batch_size; ++batch) {
+            std::iota(data + batch * seq_len, data + (batch + 1) * seq_len, int64_t{0});
+        }
+        std::copy_n(m_position_ids.data<const int64_t>(), m_position_ids.get_size(), data + batch_size * seq_len);
+        return {position_ids, m_rope_delta};
+    }
     return {m_position_ids, m_rope_delta};
 }
 
@@ -811,11 +834,13 @@ std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderMiniCPMv4_7::get_gen
     int64_t rope_delta) {
     OPENVINO_ASSERT(history_size != 0,
                     "get_generation_phase_position_ids() should only be called during the generation phase.");
-    ov::Tensor position_ids{ov::element::i64, {3, 1, inputs_embeds_size}};
+    const size_t sections = m_vlm_config.position_ids_sections;
+    ov::Tensor position_ids{ov::element::i64, {sections, 1, inputs_embeds_size}};
     const int64_t new_pos_id = static_cast<int64_t>(history_size) + rope_delta;
-    for (size_t dim = 0; dim < 3; ++dim) {
+    for (size_t dim = 0; dim < sections; ++dim) {
         int64_t* pos_data = position_ids.data<int64_t>() + dim * inputs_embeds_size;
-        std::iota(pos_data, pos_data + inputs_embeds_size, new_pos_id);
+        const int64_t start = sections == 4 && dim == 0 ? static_cast<int64_t>(history_size) : new_pos_id;
+        std::iota(pos_data, pos_data + inputs_embeds_size, start);
     }
     return {position_ids, rope_delta};
 }

@@ -142,6 +142,7 @@ public:
     std::string video_start = "<video>";
 
     // MiniCPM-V 4.7 specific config
+    size_t position_ids_sections = 3;
     /// @brief Image size for num_patches_per_side calculation in vision embeddings.
     size_t vision_config_image_size = 980;
     /// @brief Window kernel size for ViT window attention merge.

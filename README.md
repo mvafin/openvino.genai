@@ -117,15 +117,26 @@ DSpark Markov logits; optional confidence is exposed by the frontend. CPU EAGLE3
 use continuous batching. DFlash currently accepts one active request, greedy decoding,
 and prefix caching disabled. EAGLE3's real Qwen3-8B pair passed repeated two-request
 generation and target-only greedy agreement. The real Qwen3.6-35B-A3B/DFlash pair passed
-repeated single-request PA generation.
+repeated single-request PA generation. The unfinished DeepSeek-V4 DFlash backbone and
+multiple-active-request support are deferred to a follow-up PR.
+
+MiniCPM-V4.7's 1B Q4_K_M decoder and matching 4x projector run repeated image generation
+with SDPA and PA. The GGUF consumer supplies the decoder's four-section positions while
+the Optimum path retains three sections. Both backends agree on the tested real image,
+but its headline transcription is incorrect; this does not establish image quality.
+The original projector also fails its full-feature numerical parity gate. Gemma3n's
+vision-only diagnostic passes full-feature parity and repeated SDPA/PA generation;
+the original combined projector is rejected because `gemma3na` audio is unsupported.
 
 Qwen3TTS's GGUF subtalker accepts temperature 1, top-k 50, top-p 1 and sampling.
-Its public pipeline has passed repeated finite-PCM generation and exact seeded reset.
+Its public pipeline has passed repeated finite-PCM generation and exact seeded repeat.
+The current Text2SpeechPipeline has no public streaming/cancellation callback, so those
+API checks cannot run. Finite output with a zero speaker embedding does not establish quality.
 An installed CPU build of Qwen3-ASR Q8_0 transcribed two pinned LibriSpeech dummy
 validation clips with one word error across 27 reference words (3.7% WER), exact
 repeated output and cancellation/reset through `StreamerBase`. This is a small quality
 smoke check. The C, C++ and Python libraries also build against a clean OpenVINO installation.
-Real quantized ASR/TTS parity, Gemma3n's original numerical gate, broader draft
+Real quantized ASR/TTS parity, Gemma3n checkpoint parity, broader draft
 acceptance, Omni audio preprocessing and full media/configuration matrices remain
 outstanding. See the companion frontend's supported-model and mmproj documentation
 for the exact implemented contracts and validation limitations.

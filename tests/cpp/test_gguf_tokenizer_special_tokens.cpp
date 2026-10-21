@@ -9,6 +9,7 @@
 #include "gguf_utils/gguf_lfm2_audio.hpp"
 #include "gguf_utils/gguf_multimodal.hpp"
 #include "gtest/gtest.h"
+#include "openvino/genai/gguf.hpp"
 #include "openvino/genai/tokenizer.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/gather.hpp"
@@ -20,10 +21,10 @@
 #include "visual_language/gemma3/classes.hpp"
 #include "visual_language/gemma4/classes.hpp"
 #include "visual_language/lfm2/classes.hpp"
+#include "visual_language/minicpmv4_7/classes.hpp"
 #include "visual_language/muse_glimmer/classes.hpp"
 #include "visual_language/vlm_chat_context.hpp"
 #include "visual_language/vlm_utils.hpp"
-#include "openvino/genai/gguf.hpp"
 
 namespace {
 ov::genai::GGUFTokenizerParameters sentencepiece_config() {
@@ -428,6 +429,70 @@ TEST(GGUFMultimodal, Gemma3PositionOffsetAppliesDuringPrefillAndDecode) {
         EXPECT_EQ(prefill.data<int64_t>()[0], offset);
         EXPECT_EQ(prefill.data<int64_t>()[2], 2 + offset);
         EXPECT_EQ(decode.data<int64_t>()[0], 3 + offset);
+    }
+}
+
+TEST(GGUFMultimodal, MiniCPMPositionSectionsPreserveCanvasPositionsAndRopeDelta) {
+    using namespace ov::genai;
+    GGUFTokenizer tokenizer(sentencepiece_config());
+    const std::vector<int64_t> time{0, 1, 2, 2, 2, 2, 2, 2, 2, 6, 7};
+    const std::vector<int64_t> height{0, 1, 1, 2, 2, 2, 3, 3, 3, 6, 7};
+    const std::vector<int64_t> width{0, 1, 1, 2, 3, 4, 2, 3, 4, 6, 7};
+    const std::string prompt = "a<start_of_image><|image|><|image|><|image|><|image|><|image|><|image|><end_of_image>b";
+    EncodedImage image{ov::Tensor(ov::element::f32, {6, 4})};
+    std::fill_n(image.resized_source.data<float>(), image.resized_source.get_size(), 0.5f);
+    image.crop_sizes = {{2, 3}};
+    for (size_t sections : {3u, 4u}) {
+        SCOPED_TRACE(sections);
+        auto models = gemma4_models();
+        nlohmann::json config{{"model_type", "minicpmv4_7"}, {"hidden_size", 4}};
+        if (sections == 4)
+            config["position_ids_sections"] = 4;
+        models.config = VLMConfig(config);
+        EXPECT_EQ(models.config.position_ids_sections, sections);
+        models.config.image_pad_token = "<|image|>";
+        models.config.video_pad_token = "<|video|>";
+        models.config.vision_config_window_kernel_size = 1;
+        models.config.merge_kernel_size = 1;
+        InputsEmbedderMiniCPMv4_7 embedder(models, tokenizer, "CPU", {});
+        embedder.set_apply_chat_template_status(false);
+        VLMPerfMetrics metrics;
+        const auto embeddings = embedder.get_inputs_embeds(prompt, {image}, metrics, true, {0});
+        ASSERT_EQ(embeddings.get_shape(), (ov::Shape{1, 11, 4}));
+        const auto [prefill, rope_delta] = embedder.get_position_ids(11, 0);
+        ASSERT_EQ(prefill.get_shape(), (ov::Shape{sections, 1, 11}));
+        ASSERT_EQ(rope_delta, -3);
+        std::vector<int64_t> expected;
+        if (sections == 4)
+            expected = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        for (const auto& channel : {time, height, width})
+            expected.insert(expected.end(), channel.begin(), channel.end());
+        EXPECT_EQ(std::vector<int64_t>(prefill.data<int64_t>(), prefill.data<int64_t>() + prefill.get_size()),
+                  expected);
+        embedder.set_position_ids(prefill);
+        for (size_t repeat = 0; repeat < 2; ++repeat) {
+            const auto roundtrip = embedder.get_position_ids(11, 0);
+            EXPECT_EQ(roundtrip.first.get_shape(), prefill.get_shape());
+            EXPECT_EQ(roundtrip.second, rope_delta);
+            EXPECT_EQ(std::vector<int64_t>(roundtrip.first.data<int64_t>(),
+                                           roundtrip.first.data<int64_t>() + roundtrip.first.get_size()),
+                      expected);
+        }
+        for (size_t tokens : {1u, 3u}) {
+            const auto [decode, decode_delta] = embedder.get_generation_phase_position_ids(tokens, 11, *rope_delta);
+            ASSERT_EQ(decode.get_shape(), (ov::Shape{sections, 1, tokens}));
+            EXPECT_EQ(decode_delta, rope_delta);
+            for (size_t channel = 0; channel < sections; ++channel)
+                for (size_t token = 0; token < tokens; ++token)
+                    EXPECT_EQ(decode.data<int64_t>()[channel * tokens + token],
+                              (sections == 4 && channel == 0 ? 11 : 8) + token);
+        }
+        const auto cached = embedder.get_position_ids(3, 11);
+        const auto decode = embedder.get_generation_phase_position_ids(3, 11, *rope_delta);
+        EXPECT_EQ(cached.second, rope_delta);
+        EXPECT_EQ(
+            std::vector<int64_t>(cached.first.data<int64_t>(), cached.first.data<int64_t>() + cached.first.get_size()),
+            std::vector<int64_t>(decode.first.data<int64_t>(), decode.first.data<int64_t>() + decode.first.get_size()));
     }
 }
 

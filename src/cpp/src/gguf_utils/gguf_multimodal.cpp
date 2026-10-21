@@ -109,6 +109,11 @@ Configs gguf_configs(const std::string& architecture,
         const auto merge = meta.integer("vision.merge");
         c.config["model_type"] = "minicpmv4_7";
         c.config["position_ids_offset"] = 0;
+        const auto& position_shape = models.language->input("position_ids").get_partial_shape();
+        OPENVINO_ASSERT(position_shape.rank().is_static() && position_shape.rank().get_length() == 3 &&
+                            position_shape[0].is_static(),
+                        "MiniCPM language position_ids must have a static section count");
+        c.config["position_ids_sections"] = position_shape[0].get_length();
         c.config["vision_config"]["image_size"] = size;
         c.config["vision_config"]["window_kernel_size"] = {merge == 4 ? 2 : 1};
         c.config["merge_kernel_size"] = {2};
