@@ -107,53 +107,29 @@ your contribution under these terms.
 
 ### Additional GGUF families on the mmproj branch
 
-The companion OpenVINO frontend changes add Qwen3VL DeepStack, MiniCPM-V4.7 packed
-windows, Gemma3n MobileNet vision, Qwen3-ASR audio, Qwen3-Omni audio loading,
-EAGLE3/DFlash draft loading and Qwen3TTS speaker/predictor/waveform components.
-Use `GGUF_READER="FRONTEND"` and pass `mmproj_path` for multimodal GGUF files.
-The `draft_model()` helper accepts GGUF paths; omitted embedding/head weights are
-cloned from the target before compilation. DFlash consumes selector/LiLiCorr lattices and
-DSpark Markov logits; optional confidence is exposed by the frontend. CPU EAGLE3/DFlash
-use continuous batching. DFlash currently accepts one active request, greedy decoding,
-and prefix caching disabled. EAGLE3's real Qwen3-8B pair passed repeated two-request
-generation and target-only greedy agreement. The real Qwen3.6-35B-A3B/DFlash pair passed
-repeated single-request PA generation. The unfinished DeepSeek-V4 DFlash backbone and
-multiple-active-request support are deferred to a follow-up PR.
+The companion [OpenVINO frontend PR](https://github.com/openvinotoolkit/openvino/pull/39000)
+enables Cohere2, dense Qwen3VL with DeepStack, Gemma3n vision, EAGLE3 and Qwen-backed
+DFlash. Use `GGUF_READER="FRONTEND"` and `mmproj_path` for supported multimodal files.
 
-MiniCPM-V4.7's 1B Q4_K_M decoder and matching 4x projector run repeated image generation
-with SDPA and PA. The GGUF consumer preserves the learned 70x70 position grid separately
-from the 448-pixel processor resize and supplies four-section decoder positions; the
-Optimum path retains three sections. Gemma3n inserts its single GGUF `<pad>` image token,
-including per-layer embedding spans. Both models now identify the gray tabby in a pinned
-cat/cardboard-box image with exact repeats and matching SDPA/PA output. A 64-token PA
-check names the box for Gemma3n; MiniCPM's object description is truncated after "open
-cardboard". This small check does not establish broad image quality or numerical parity.
-MiniCPM's original projector fails full-feature parity. Gemma3n's vision-only diagnostic
-passes that gate, while its original combined projector rejects unsupported `gemma3na` audio.
+Gemma3n inserts the actual GGUF `<pad>` image placeholder, including per-layer embedding
+spans. The original E2B Q4_0 decoder matches 13/13 reference-token predictions, and its
+original combined projector passes full vision-feature NMSE `6.10e-7` against `1e-5`.
+The frontend omits unsupported `gemma3na` audio and records `audio.supported=false`.
+Repeated 64-token PA image generation correctly identifies the cat and cardboard box.
+Original Cohere2 Q4_0 matches 13/13 predictions and gives identical repeated SDPA/PA text
+outputs. Dense Qwen3VL Q4_0 passes repeated image generation with both backends.
 
-Original Cohere2 and AFMoE text APIs repeat deterministically. AFMoE's SDPA/PA outputs
-match; Cohere2's differ. Qwen3-Omni's original text APIs repeat and agree between backends,
-but its decoder replay matches 11/13 and fails the 90% gate, as does original AFMoE.
-The canonical Qwen3Next checkpoint attempt is resource-blocked by a 16 GiB available-RAM
-guard before frontend execution completes; its APIs remain unrun.
+`draft_model()` accepts GGUF paths and clones omitted embedding/head weights from the
+target before compilation. CPU EAGLE3/DFlash use continuous batching. EAGLE3's real
+Qwen3-8B pair passes repeated two-request generation and target-only greedy agreement.
+DFlash accepts one active request, greedy decoding and disabled prefix caching; its
+Qwen3.6-35B-A3B pair passes repeated PA generation. DeepSeek-V4 and multiple active
+DFlash requests are deferred.
 
-Qwen3TTS's GGUF subtalker accepts temperature 1, top-k 50, top-p 1 and sampling.
-Its public pipeline has passed repeated finite-PCM generation and exact seeded repeat.
-The current Text2SpeechPipeline has no public streaming/cancellation callback, so those
-API checks cannot run. Finite output with a zero speaker embedding does not establish quality.
-An installed CPU build of Qwen3-ASR Q8_0 transcribed two pinned LibriSpeech dummy
-validation clips with one word error across 27 reference words (3.7% WER), exact
-repeated output and cancellation/reset through `StreamerBase`. This is a small quality
-smoke check. The C, C++ and Python libraries also build against a clean OpenVINO installation.
-Real quantized ASR/TTS parity, Gemma3n checkpoint parity, broader draft
-acceptance and full media/configuration matrices remain
-outstanding. See the companion frontend's supported-model and mmproj documentation
-for the exact implemented contracts and validation limitations.
-
-Original Qwen3-Omni-30B-A3B Q4_K_M and its combined Q8_0 projector pass four repeated
-CPU image/audio API cases with matching SDPA/PA outputs. In-memory GGUF loading uses
-optional DeepStack inputs, split vision models and the decoder's declared three position
-sections; exported-model Omni retains its four-section contract. The pinned image produces
-a gray tabby description, truncated before the box at 64 tokens. A pinned 16 kHz LibriSpeech
-clip is transcribed correctly, using "Mr." for the reference's "MISTER". These limited media
-checks do not waive the original decoder's failed numerical gate or establish broad quality.
+AFMoE, Qwen3Next, Qwen3VL MoE/Omni, Qwen3-ASR, Qwen3TTS and MiniCPM-V 4.7 are deferred
+from native frontend support. Original decoder/projector accuracy failures remain recorded;
+Qwen3Next additionally lacks a completed result due to RAM limits. Consumer plumbing and
+regression fixtures remain for future work, including declared multimodal position sections,
+learned-grid geometry, optional DeepStack and audio components. Existing Optimum position
+and audio contracts remain covered. See the frontend's supported-model and mmproj
+documentation for checkpoint evidence and limitations.
