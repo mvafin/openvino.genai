@@ -31,19 +31,19 @@ The default legacy reader handles `llama`, `qwen2`, and `qwen3`, and ignores som
 such as `rope_freqs.weight`. The OpenVINO GGUF frontend supports additional architectures
 and preserves their model and multimodal contracts.
 
-For the families added in the companion OpenVINO PR, support is limited to validated
-formats on CPU. AFMoE requires F32 tensors. MiniCPM-V 4.7 requires an F32 projector
-with its existing `qwen35` decoder. Qwen3-ASR supports the original BF16 decoder with
-an F32 `qwen3a` projector; the original Q8_0 decoder requires
-`DYNAMIC_QUANTIZATION_GROUP_SIZE=32`. Qwen3TTS requires F32 decoder and combined
-speaker/predictor/codec projector tensors; seeded zero-speaker generation was checked,
-while speech quality and voice cloning remain unassessed. Their original
-quantized/BF16 projector files fail the feature checks. Use `GGUF_READER="FRONTEND"` and consult the
-[OpenVINO format and checkpoint limits](https://github.com/openvinotoolkit/openvino/pull/39000).
+The companion OpenVINO frontend enables AFMoE, Qwen3VL MoE/Omni, Qwen3-ASR,
+Qwen3TTS and MiniCPM-V 4.7 with its implemented weight formats, including quantized
+GGUF files. F32/F16 reference checks establish graph correctness; known differences
+in quantized logits or projector features remain documented accuracy limitations.
+Use `GGUF_READER="FRONTEND"` and consult the
+[OpenVINO checkpoint and runtime limits](https://github.com/openvinotoolkit/openvino/pull/39000).
+ASR Q8_0 matches more reference choices with `DYNAMIC_QUANTIZATION_GROUP_SIZE=32`.
+TTS speech quality and voice cloning remain unassessed.
 
-Qwen3-Omni is limited to the validated mixed F16/F32 decoder and F32 combined
-projector. Native SDPA/PA text generation is validated. For image and audio inputs,
-use PA with bounded prefill chunks; unchunked media prefill exceeded the RAM guard.
+Qwen3-Omni's repeated native SDPA/PA text and PA image/audio checks use a mixed
+F16/F32 decoder and F32 combined projector as reference evidence. Quantized files
+are also enabled. For long media inputs, use PA with bounded prefill chunks;
+unchunked reference-image prefill exceeded the RAM guard.
 The tested single-request configuration is:
 
 ```python
