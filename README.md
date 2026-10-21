@@ -109,7 +109,11 @@ your contribution under these terms.
 
 The companion [OpenVINO frontend PR](https://github.com/openvinotoolkit/openvino/pull/39000)
 enables Cohere2, dense Qwen3VL with DeepStack, Gemma3n vision, EAGLE3 and Qwen-backed
-DFlash. Use `GGUF_READER="FRONTEND"` and `mmproj_path` for supported multimodal files.
+DFlash. Paired GenAI support also covers AFMoE, Qwen3VL MoE/Omni, Qwen3-ASR, Qwen3TTS
+and MiniCPM-V 4.7. Use `GGUF_READER="FRONTEND"` and `mmproj_path` for supported
+multimodal files. See the frontend's [supported-model](https://github.com/openvinotoolkit/openvino/blob/mvafin/gguf/2026-model-families/src/frontends/gguf/docs/supported_models.md#quantized-support-and-model-quality)
+and [projector](https://github.com/openvinotoolkit/openvino/blob/mvafin/gguf/2026-model-families/src/frontends/gguf/docs/mmproj.md#projector-reference-accuracy-and-runtime-limits)
+documentation for checkpoint evidence and limitations.
 
 Gemma3n inserts the actual GGUF `<pad>` image placeholder, including per-layer embedding
 spans. The original E2B Q4_0 decoder matches 13/13 reference-token predictions, and its
@@ -126,10 +130,29 @@ DFlash accepts one active request, greedy decoding and disabled prefix caching; 
 Qwen3.6-35B-A3B pair passes repeated PA generation. DeepSeek-V4 and multiple active
 DFlash requests are deferred.
 
-AFMoE, Qwen3Next, Qwen3VL MoE/Omni, Qwen3-ASR, Qwen3TTS and MiniCPM-V 4.7 are deferred
-from native frontend support. Original decoder/projector accuracy failures remain recorded;
-Qwen3Next additionally lacks a completed result due to RAM limits. Consumer plumbing and
-regression fixtures remain for future work, including declared multimodal position sections,
-learned-grid geometry, optional DeepStack and audio components. Existing Optimum position
-and audio contracts remain covered. See the frontend's supported-model and mmproj
-documentation for checkpoint evidence and limitations.
+AFMoE (Trinity-Nano-Preview Q4_K_S) and Qwen3-Omni-30B-A3B-Instruct Q4_K_M have
+quantized text-decoder support on CPU with GenAI PagedAttention. A 20-prompt WWB comparison
+(greedy, at most 128 generated tokens, F16 KV, and `OV_GGUF_Q4_K_ZP_F16=1`) used the same
+quantized GGUF in both backends and pinned llama.cpp reference answers generated from
+original publisher BF16 GGUFs converted to F16. Mean semantic-similarity scores were:
+
+| Quantized checkpoint | llama.cpp | GenAI, reference IDs | GenAI, default string input |
+|---|---:|---:|---:|
+| Trinity-Nano-Preview Q4_K_S (AFMoE) | 0.9174 | 0.9272 | 0.9275 |
+| Qwen3-Omni-30B-A3B-Instruct Q4_K_M | 0.9844 | 0.9832 | 0.9832 |
+
+These scores measure agreement with reference answers, not correctness or percent
+accuracy. Matched-input GenAI minus llama.cpp is +0.0098 for AFMoE and −0.0011 for Omni,
+with no material additional GenAI quality loss in this sample. AFMoE's GenAI tokenizer segments ` $` and `-sentence` differently on two prompts;
+the default-input score regenerated those prompts with string input and reused 18 verified
+rows. Omni's GenAI default stop set omits llama.cpp's `<|fim_pad|>`, `<|repo_name|>` and
+`<|file_sep|>` markers; all 20 prompt tokenizations match and none of the omitted markers
+was sampled. These tokenizer and EOG differences remain tracked separately.
+
+The WWB comparison covers text only. Omni image and audio-input cases have separate CPU PA
+coverage with a constrained scheduler; speech output, video and longer media remain
+unassessed. Qwen3TTS's F32 path returns repeated finite audio, while speech quality, voice
+cloning and longer generation remain unassessed and its public API has no cancellation.
+Qwen3Next has no completed full-model/API result because of RAM limits. DeepSeek-V4 and
+multiple active DFlash requests remain deferred. Numerical token-replay and projector
+parity diagnostics are documented separately in the frontend references above.
