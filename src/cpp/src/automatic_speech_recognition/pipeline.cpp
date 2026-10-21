@@ -13,6 +13,12 @@
 #include "automatic_speech_recognition/models/whisper/pipeline.hpp"
 #include "automatic_speech_recognition/pipeline_base.hpp"
 #include "utils.hpp"
+#ifdef ENABLE_GGUF
+#    include "gguf_utils/gguf_frontend_extensions.hpp"
+#    include "gguf_utils/gguf_tokenizer.hpp"
+#    include "gguf_utils/gguf_utils.hpp"
+#    include "openvino/frontend/gguf/adapt_mmproj_to_genai.hpp"
+#endif
 
 namespace {
 
@@ -55,6 +61,46 @@ ASRPipeline::ASRPipeline(const std::filesystem::path& models_path,
                          const std::string& device,
                          const ov::AnyMap& properties) {
     const auto start_time = std::chrono::steady_clock::now();
+#ifdef ENABLE_GGUF
+    if (is_gguf_model(models_path)) {
+        auto runtime = properties;
+        const auto extensions = utils::extract_extensions_to_core(runtime);
+        const auto projector = runtime.find(mmproj_path.name());
+        OPENVINO_ASSERT(projector != runtime.end(), "GGUF ASR requires mmproj_path");
+        const auto projector_path = projector->second.as<std::string>();
+        runtime.erase(projector);
+        auto gguf_properties = gguf_utils::extract_gguf_properties(runtime);
+        OPENVINO_ASSERT(!gguf_properties.legacy_reader.value_or(false), "GGUF ASR requires gguf_reader=FRONTEND");
+        runtime = std::move(gguf_properties.rest);
+        namespace gguf = ov::frontend::gguf;
+        gguf::FrontEnd frontend;
+        const auto extension =
+            register_gguf_extensions(frontend, extensions, gguf::GenAIExtension::InputMode::EMBEDS_TO_LOGITS);
+        auto decoder = frontend.convert(frontend.load(models_path.string()));
+        OPENVINO_ASSERT(decoder->get_rt_info<std::string>("gguf_architecture") == "qwen3vl",
+                        "GGUF ASR requires a Qwen3-ASR decoder");
+        auto tokenizer = GGUFTokenizer(GGUFTokenizerParameters(take_gguf_tokenizer_metadata(decoder)), runtime);
+        gguf::FrontEnd projector_frontend;
+        register_gguf_extensions(projector_frontend, extensions);
+        auto encoder = projector_frontend.convert(projector_frontend.load(projector_path));
+        OPENVINO_ASSERT(encoder->get_rt_info<std::string>({"gguf_mmproj", "audio.projector"}) == "qwen3a",
+                        "GGUF ASR requires a qwen3a audio projector");
+        const auto mel_bins =
+            std::stoull(encoder->get_rt_info<std::string>({"gguf_mmproj", "clip.audio.num_mel_bins"}));
+        gguf::pass::AdaptMmprojToGenAI(gguf::pass::AdaptMmprojToGenAI::Modality::AUDIO).run_on_model(encoder);
+        m_impl = std::make_unique<Qwen3ASR>(tokenizer,
+                                            encoder,
+                                            decoder,
+                                            extension->get_embedding_model(),
+                                            mel_bins,
+                                            device,
+                                            runtime);
+        m_impl->m_load_time_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time)
+                .count();
+        return;
+    }
+#endif
     const ASRModelType model_type = read_model_type(models_path);
 
     OPENVINO_ASSERT(!properties.count(ov::genai::forced_aligner.name()) || model_type == ASRModelType::qwen3_asr,

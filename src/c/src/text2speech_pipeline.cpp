@@ -6,10 +6,9 @@
 #include <cstdarg>
 #include <cstring>
 #include <filesystem>
-#include <vector>
-
 #include <openvino/runtime/remote_tensor.hpp>
 #include <openvino/runtime/tensor.hpp>
+#include <vector>
 
 #include "types_c.h"
 
@@ -45,21 +44,6 @@ ov_status_e convert_embedding(const ov_tensor_t* input, ov::Tensor& output) {
         return ov_status_e::INVALID_C_PARAM;
     output = ov::Tensor(ov::element::f32, dims, data);
     return ov_status_e::OK;
-}
-
-ov::AnyMap speech_properties(const ov::genai::SpeechGenerationConfig& config) {
-    // Supply every speech setting so an explicit C config replaces any stored speech settings
-    // for this request. The C++ generate method applies these to a request-local copy.
-    ov::AnyMap properties{{"minlenratio", config.minlenratio},
-                          {"maxlenratio", config.maxlenratio},
-                          {"threshold", config.threshold},
-                          {"speed", config.speed},
-                          {"language", config.language},
-                          {"max_phoneme_length", config.max_phoneme_length}};
-    properties["phonemize_fallback_model_dir"] = config.phonemize_fallback_model_dir
-                                                     ? ov::Any(*config.phonemize_fallback_model_dir)
-                                                     : ov::Any{};
-    return properties;
 }
 }  // namespace
 
@@ -123,12 +107,11 @@ ov_status_e ov_genai_text2speech_pipeline_generate_batch(ov_genai_text2speech_pi
         auto result = std::make_unique<ov_genai_text2speech_decoded_results>();
         if (config && config->object) {
             config->object->validate();
-            const ov::AnyMap properties = speech_properties(*config->object);
             result->object = std::make_shared<ov::genai::Text2SpeechDecodedResults>(
-                pipeline->object->generate(inputs, embedding, properties));
+                pipeline->object->generate_with_config(inputs, embedding, *config->object));
         } else {
-            result->object = std::make_shared<ov::genai::Text2SpeechDecodedResults>(
-                pipeline->object->generate(inputs, embedding));
+            result->object =
+                std::make_shared<ov::genai::Text2SpeechDecodedResults>(pipeline->object->generate(inputs, embedding));
         }
         *results = result.release();
         return ov_status_e::OK;

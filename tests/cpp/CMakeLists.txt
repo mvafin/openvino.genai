@@ -65,6 +65,12 @@ install(TARGETS ${TEST_TARGET_NAME} tests_cache_allocation_failure
         COMPONENT tests
         EXCLUDE_FROM_ALL)
 
+if(TARGET openvino_tokenizers)
+    install(TARGETS openvino_tokenizers
+            LIBRARY DESTINATION tests/ COMPONENT tests EXCLUDE_FROM_ALL
+            RUNTIME DESTINATION tests/ COMPONENT tests EXCLUDE_FROM_ALL)
+endif()
+
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/data/"
         DESTINATION tests/data/
         COMPONENT tests

@@ -27,6 +27,7 @@ public:
                  const std::string& device,
                  const ov::AnyMap& properties,
                  const Tokenizer& tokenizer);
+    Qwen3TTSImpl(const std::filesystem::path& models_path, const std::string& device, const ov::AnyMap& properties);
 
     Text2SpeechDecodedResults generate(const std::vector<std::string>& texts,
                                        const ov::Tensor& speaker_embedding,
@@ -117,8 +118,7 @@ private:
     std::string normalize_text_language(const std::string& language) const;
     std::string normalize_speaker(const std::string& speaker) const;
     bool is_base_model() const;
-    ov::Tensor normalize_external_speaker_embedding(const ov::Tensor& speaker_embedding,
-                                                    size_t hidden_size) const;
+    ov::Tensor normalize_external_speaker_embedding(const ov::Tensor& speaker_embedding, size_t hidden_size) const;
     std::vector<float> normalize_ref_audio_waveform(const ov::Tensor& ref_audio) const;
     ov::Tensor extract_qwen3_speaker_embedding_from_audio(const ov::Tensor& ref_audio) const;
     ov::Tensor extract_qwen3_ref_code_from_audio(const ov::Tensor& ref_audio) const;
@@ -153,6 +153,9 @@ private:
     bool m_predictor_static = false;  // true when predictor is converted to stateless+static at runtime
     bool m_predictor_has_beam_idx = false;
     ov::InferRequest m_talker_code_predictor_embedding;
+    bool m_gguf = false;
+    int64_t m_gguf_codec_offset = 0;
+    ov::Tensor m_gguf_feedback;
 
     // Static all-heads code predictor state. The loaded predictor IR must expose
     // explicit past_key_values inputs (a non-static model is rejected at
@@ -164,14 +167,14 @@ private:
     size_t m_pred_kv_len = 0;     // KV slots in present outputs (= past_len + 1)
     size_t m_pred_num_heads = 0;  // stacked code-group heads in `logits`
     size_t m_pred_vocab = 0;
-    size_t m_pred_position = 0;   // running absolute position within a frame
+    size_t m_pred_position = 0;             // running absolute position within a frame
     std::vector<ov::Tensor> m_pred_past_k;  // per-layer host KV buffers
     std::vector<ov::Tensor> m_pred_past_v;
     // Pre-allocated reusable tensors for infer_predictor (avoid repeated allocations)
-    ov::Tensor m_pred_attn;   // attention_mask, reused across calls
-    ov::Tensor m_pred_pos;    // position_ids, reused across calls
+    ov::Tensor m_pred_attn;  // attention_mask, reused across calls
+    ov::Tensor m_pred_pos;   // position_ids, reused across calls
     // Pre-allocated reusable tensors for infer_predictor_embedding (avoid repeated allocations)
-    ov::Tensor m_pred_emb_ids;  // token ids input, reused across calls
+    ov::Tensor m_pred_emb_ids;   // token ids input, reused across calls
     ov::Tensor m_pred_emb_step;  // generation_steps input, reused across calls
     ov::InferRequest m_speech_tokenizer_decoder;
     bool m_decoder_static = false;  // true when reshaped to a fixed DECODER_WINDOW_LEN window (NPU)
@@ -180,8 +183,8 @@ private:
     ov::InferRequest m_speech_tokenizer_encoder;
 
     uint32_t m_output_sample_rate = 24000;
-    mutable std::unordered_map<std::string, double>   m_perf_ms;
-    mutable std::unordered_map<std::string, int64_t>  m_perf_calls;
+    mutable std::unordered_map<std::string, double> m_perf_ms;
+    mutable std::unordered_map<std::string, int64_t> m_perf_calls;
     mutable std::unordered_map<std::string, std::string> m_perf_device;
     mutable int64_t m_talker_prefill_tokens = 0;
 

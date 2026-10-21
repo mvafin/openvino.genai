@@ -9,8 +9,10 @@
 #include "gguf_utils/gguf_lfm2_audio.hpp"
 #include "gguf_utils/gguf_multimodal.hpp"
 #include "gtest/gtest.h"
+#include "openvino/genai/gguf.hpp"
 #include "openvino/genai/tokenizer.hpp"
 #include "openvino/op/constant.hpp"
+#include "openvino/op/convert.hpp"
 #include "openvino/op/gather.hpp"
 #include "openvino/op/parameter.hpp"
 #include "openvino/op/reshape.hpp"
@@ -18,12 +20,14 @@
 #include "visual_language/clip.hpp"
 #include "visual_language/embedding_model.hpp"
 #include "visual_language/gemma3/classes.hpp"
+#include "visual_language/gemma3n/classes.hpp"
 #include "visual_language/gemma4/classes.hpp"
 #include "visual_language/lfm2/classes.hpp"
+#include "visual_language/minicpmv4_7/classes.hpp"
 #include "visual_language/muse_glimmer/classes.hpp"
+#include "visual_language/qwen3_omni/classes.hpp"
 #include "visual_language/vlm_chat_context.hpp"
 #include "visual_language/vlm_utils.hpp"
-#include "openvino/genai/gguf.hpp"
 
 namespace {
 ov::genai::GGUFTokenizerParameters sentencepiece_config() {
@@ -115,6 +119,36 @@ ov::genai::VLMModels gemma4_models() {
     auto pixels = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{1, -1, 12});
     pixels->output(0).set_names({"pixel_values"});
     models.models["vision_embeddings"] = std::make_shared<ov::Model>(ov::OutputVector{pixels}, ov::ParameterVector{pixels});
+    return models;
+}
+
+ov::genai::VLMModels qwen3_split_models(ov::genai::VLMModelType type) {
+    auto models = gemma4_models();
+    models.config.model_type = type;
+    models.config.vision_start_token = "<start_of_image>";
+    models.config.vision_end_token = "<end_of_image>";
+    models.config.image_pad_token = "<pad>";
+    models.config.video_pad_token = "<|video|>";
+    models.config.vision_config_num_position_embeddings = 4;
+    models.processor_config.merge_size = 1;
+    models.processor_config.preserve_native_resolution = true;
+    auto indices = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{4, -1});
+    indices->output(0).set_names({"input"});
+    auto positions = std::make_shared<ov::op::v8::Gather>(ov::op::v0::Constant::create(ov::element::f32, {4, 4}, {1.f}),
+                                                          indices,
+                                                          ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+    models.models["vision_embeddings_pos"] =
+        std::make_shared<ov::Model>(ov::OutputVector{positions}, ov::ParameterVector{indices});
+    auto hidden = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{-1, 4});
+    hidden->output(0).set_names({"hidden_states"});
+    auto rotary = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{-1, 4});
+    rotary->output(0).set_names({"rotary_pos_emb"});
+    auto mask = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{1, -1, -1});
+    mask->output(0).set_names({"attention_mask"});
+    auto output = std::make_shared<ov::op::v1::Add>(hidden, ov::op::v0::Constant::create(ov::element::f32, {}, {0.f}));
+    output->output(0).set_names({"last_hidden_state"});
+    models.models["vision_embeddings_merger"] =
+        std::make_shared<ov::Model>(ov::OutputVector{output}, ov::ParameterVector{hidden, rotary, mask});
     return models;
 }
 
@@ -222,6 +256,132 @@ TEST(GGUFTokenizer, Gemma4ByteTokenSpellingUsesOrdinaryCharacters) {
     ASSERT_EQ(newline_ids.get_size(), 1);
     EXPECT_EQ(newline_ids.data<int64_t>()[0], 10);
     EXPECT_EQ(tokenizer.decode(std::vector<int64_t>{11}), "\n");
+}
+
+TEST(GGUFMultimodal, Qwen3VLAllowsMissingOptionalDeepStackOutput) {
+    auto embeddings = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{-1, 4});
+    embeddings->output(0).set_names({"inputs_embeds"});
+    auto merger = std::make_shared<ov::Model>(ov::OutputVector{embeddings}, ov::ParameterVector{embeddings});
+    EXPECT_TRUE(ov::genai::gguf_qwen3vl_deepstack_visual_indexes(merger).empty());
+    EXPECT_THROW(ov::genai::gguf_qwen3vl_deepstack_visual_indexes(nullptr), ov::Exception);
+}
+
+TEST(GGUFMultimodal, Qwen3VLDeepStackIndexesFollowOutputLayerCount) {
+    auto features = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{2, -1, 4});
+    features->output(0).set_names({"deepstack_feature_lists", "features"});
+    auto merger = std::make_shared<ov::Model>(ov::OutputVector{features}, ov::ParameterVector{features});
+    EXPECT_EQ(ov::genai::gguf_qwen3vl_deepstack_visual_indexes(merger), (std::vector<size_t>{0, 1}));
+}
+
+TEST(GGUFMultimodal, Qwen3VLRejectsMalformedPresentDeepStackOutput) {
+    for (const auto& shape : {ov::PartialShape{2, 4}, ov::PartialShape::dynamic(), ov::PartialShape{-1, -1, 4}}) {
+        SCOPED_TRACE(shape);
+        auto features = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, shape);
+        features->output(0).set_names({"deepstack_feature_lists"});
+        auto merger = std::make_shared<ov::Model>(ov::OutputVector{features}, ov::ParameterVector{features});
+        EXPECT_THROW(ov::genai::gguf_qwen3vl_deepstack_visual_indexes(merger), ov::Exception);
+    }
+}
+
+TEST(GGUFMultimodal, Qwen3SplitConsumersRunTextAndImagesWithoutDeepStack) {
+    using namespace ov::genai;
+    GGUFTokenizer tokenizer(sentencepiece_config());
+    for (const auto type : {VLMModelType::QWEN3_VL, VLMModelType::QWEN3_OMNI}) {
+        auto models = qwen3_split_models(type);
+        std::unique_ptr<InputsEmbedderQwen3VL> embedder;
+        if (type == VLMModelType::QWEN3_OMNI)
+            embedder = std::make_unique<InputsEmbedderQwen3Omni>(models, tokenizer, "CPU", ov::AnyMap{});
+        else
+            embedder = std::make_unique<InputsEmbedderQwen3VL>(models, tokenizer, "CPU", ov::AnyMap{});
+        embedder->set_apply_chat_template_status(false);
+        EXPECT_TRUE(embedder->get_lm_extra_inputs().empty());
+        VLMPerfMetrics metrics;
+        const auto text = embedder->get_inputs_embeds("a", {}, {}, metrics);
+        ASSERT_EQ(text.get_shape(), (ov::Shape{1, 2, 4}));
+        EXPECT_TRUE(embedder->get_lm_extra_inputs().empty());
+        embedder->finish_chat();
+        EncodedImage image{ov::Tensor(ov::element::f32, {4, 4})};
+        image.resized_source_size = {2, 2};
+        std::fill_n(image.resized_source.data<float>(), image.resized_source.get_size(), 7.f);
+        const auto embeddings = embedder->get_inputs_embeds("<start_of_image><pad><pad><pad><pad><end_of_image>",
+                                                            {image},
+                                                            {},
+                                                            metrics,
+                                                            true,
+                                                            {0});
+        ASSERT_EQ(embeddings.get_shape(), (ov::Shape{1, 7, 4}));
+        for (size_t token = 2; token < 6; ++token)
+            for (size_t channel = 0; channel < 4; ++channel)
+                EXPECT_FLOAT_EQ(embeddings.data<const float>()[token * 4 + channel], 8.f);
+        EXPECT_TRUE(embedder->get_lm_extra_inputs().empty());
+        EXPECT_EQ(image.resized_source.data<const float>()[0], 7.f);
+    }
+}
+
+TEST(GGUFMultimodal, Qwen3SplitConsumersRetainConfiguredDeepStackInputs) {
+    using namespace ov::genai;
+    auto models = qwen3_split_models(VLMModelType::QWEN3_VL);
+    models.config.vision_config_deepstack_visual_indexes = {0, 1};
+    GGUFTokenizer tokenizer(sentencepiece_config());
+    InputsEmbedderQwen3VL embedder(models, tokenizer, "CPU", {});
+    embedder.set_apply_chat_template_status(false);
+    VLMPerfMetrics metrics;
+    embedder.get_inputs_embeds("a", {}, {}, metrics);
+    const auto& extras = embedder.get_lm_extra_inputs();
+    EXPECT_EQ(extras.size(), 2);
+    EXPECT_EQ(extras.at("deepstack_visual_embeds").get_shape(), (ov::Shape{2, 1, 4}));
+    ASSERT_EQ(extras.at("visual_pos_masks").get_shape(), (ov::Shape{1, 1}));
+    EXPECT_FALSE(extras.at("visual_pos_masks").data<const bool>()[0]);
+}
+
+TEST(GGUFMultimodal, OmniSplitPositionsMatchDecoderSectionsInPrefillAndDecode) {
+    using namespace ov::genai;
+    struct TestEmbedder : InputsEmbedderQwen3Omni {
+        using InputsEmbedderQwen3Omni::get_generation_phase_position_ids;
+        using InputsEmbedderQwen3Omni::InputsEmbedderQwen3Omni;
+        using InputsEmbedderQwen3VL::get_inputs_embeds;
+    };
+    GGUFTokenizer tokenizer(sentencepiece_config());
+    const std::vector<int64_t> spatial{0, 1, 2, 2, 2, 2, 4, 0, 1, 2, 2, 3, 3, 4, 0, 1, 2, 3, 2, 3, 4};
+    for (const size_t sections : {3, 4}) {
+        auto models = qwen3_split_models(VLMModelType::QWEN3_OMNI);
+        models.config.position_ids_sections = sections;
+        TestEmbedder embedder(models, tokenizer, "CPU", {});
+        embedder.set_apply_chat_template_status(false);
+        VLMPerfMetrics metrics;
+        embedder.get_inputs_embeds("a", {}, {}, metrics);
+        const auto text_positions = embedder.get_position_ids(2, 0).first;
+        ASSERT_EQ(text_positions.get_shape(), (ov::Shape{sections, 1, 2}));
+        for (size_t section = 0; section < sections; ++section) {
+            EXPECT_EQ(text_positions.data<const int64_t>()[section * 2], 0);
+            EXPECT_EQ(text_positions.data<const int64_t>()[section * 2 + 1], 1);
+        }
+        embedder.finish_chat();
+        EncodedImage image{ov::Tensor(ov::element::f32, {4, 4})};
+        image.resized_source_size = {2, 2};
+        std::fill_n(image.resized_source.data<float>(), image.resized_source.get_size(), 7.f);
+        embedder
+            .get_inputs_embeds("<start_of_image><pad><pad><pad><pad><end_of_image>", {image}, {}, metrics, true, {0});
+        const auto [positions, rope_delta] = embedder.get_position_ids(7, 0);
+        ASSERT_EQ(positions.get_shape(), (ov::Shape{sections, 1, 7}));
+        ASSERT_TRUE(rope_delta.has_value());
+        EXPECT_EQ(*rope_delta, -2);
+        EXPECT_EQ(std::vector<int64_t>(positions.data<const int64_t>(), positions.data<const int64_t>() + 21), spatial);
+        if (sections == 4)
+            EXPECT_EQ(std::vector<int64_t>(positions.data<const int64_t>() + 21, positions.data<const int64_t>() + 28),
+                      (std::vector<int64_t>{0, 1, 2, 3, 4, 5, 4}));
+        const auto [decode, decode_delta] = embedder.get_generation_phase_position_ids(2, 7, *rope_delta);
+        ASSERT_EQ(decode.get_shape(), (ov::Shape{sections, 1, 2}));
+        EXPECT_EQ(decode_delta, rope_delta);
+        for (size_t section = 0; section < sections; ++section) {
+            EXPECT_EQ(decode.data<const int64_t>()[section * 2], 5);
+            EXPECT_EQ(decode.data<const int64_t>()[section * 2 + 1], 6);
+        }
+        EXPECT_TRUE(embedder.get_lm_extra_inputs().empty());
+    }
+    auto invalid = qwen3_split_models(VLMModelType::QWEN3_OMNI);
+    invalid.config.position_ids_sections = 2;
+    EXPECT_THROW((TestEmbedder(invalid, tokenizer, "CPU", {})), ov::Exception);
 }
 
 TEST(GGUFMultimodal, PreformattedChatDoesNotDuplicateSpecialTokens) {
@@ -429,6 +589,185 @@ TEST(GGUFMultimodal, Gemma3PositionOffsetAppliesDuringPrefillAndDecode) {
         EXPECT_EQ(prefill.data<int64_t>()[2], 2 + offset);
         EXPECT_EQ(decode.data<int64_t>()[0], 3 + offset);
     }
+}
+
+TEST(GGUFMultimodal, MiniCPMPositionSectionsPreserveCanvasPositionsAndRopeDelta) {
+    using namespace ov::genai;
+    GGUFTokenizer tokenizer(sentencepiece_config());
+    const std::vector<int64_t> time{0, 1, 2, 2, 2, 2, 2, 2, 2, 6, 7};
+    const std::vector<int64_t> height{0, 1, 1, 2, 2, 2, 3, 3, 3, 6, 7};
+    const std::vector<int64_t> width{0, 1, 1, 2, 3, 4, 2, 3, 4, 6, 7};
+    const std::string prompt = "a<start_of_image><|image|><|image|><|image|><|image|><|image|><|image|><end_of_image>b";
+    EncodedImage image{ov::Tensor(ov::element::f32, {6, 4})};
+    std::fill_n(image.resized_source.data<float>(), image.resized_source.get_size(), 0.5f);
+    image.crop_sizes = {{2, 3}};
+    for (size_t sections : {3u, 4u}) {
+        SCOPED_TRACE(sections);
+        auto models = gemma4_models();
+        nlohmann::json config{{"model_type", "minicpmv4_7"}, {"hidden_size", 4}};
+        if (sections == 4)
+            config["position_ids_sections"] = 4;
+        models.config = VLMConfig(config);
+        EXPECT_EQ(models.config.position_ids_sections, sections);
+        models.config.image_pad_token = "<|image|>";
+        models.config.video_pad_token = "<|video|>";
+        models.config.vision_config_window_kernel_size = 1;
+        models.config.merge_kernel_size = 1;
+        InputsEmbedderMiniCPMv4_7 embedder(models, tokenizer, "CPU", {});
+        embedder.set_apply_chat_template_status(false);
+        VLMPerfMetrics metrics;
+        const auto embeddings = embedder.get_inputs_embeds(prompt, {image}, metrics, true, {0});
+        ASSERT_EQ(embeddings.get_shape(), (ov::Shape{1, 11, 4}));
+        const auto [prefill, rope_delta] = embedder.get_position_ids(11, 0);
+        ASSERT_EQ(prefill.get_shape(), (ov::Shape{sections, 1, 11}));
+        ASSERT_EQ(rope_delta, -3);
+        std::vector<int64_t> expected;
+        if (sections == 4)
+            expected = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+        for (const auto& channel : {time, height, width})
+            expected.insert(expected.end(), channel.begin(), channel.end());
+        EXPECT_EQ(std::vector<int64_t>(prefill.data<int64_t>(), prefill.data<int64_t>() + prefill.get_size()),
+                  expected);
+        embedder.set_position_ids(prefill);
+        for (size_t repeat = 0; repeat < 2; ++repeat) {
+            const auto roundtrip = embedder.get_position_ids(11, 0);
+            EXPECT_EQ(roundtrip.first.get_shape(), prefill.get_shape());
+            EXPECT_EQ(roundtrip.second, rope_delta);
+            EXPECT_EQ(std::vector<int64_t>(roundtrip.first.data<int64_t>(),
+                                           roundtrip.first.data<int64_t>() + roundtrip.first.get_size()),
+                      expected);
+        }
+        for (size_t tokens : {1u, 3u}) {
+            const auto [decode, decode_delta] = embedder.get_generation_phase_position_ids(tokens, 11, *rope_delta);
+            ASSERT_EQ(decode.get_shape(), (ov::Shape{sections, 1, tokens}));
+            EXPECT_EQ(decode_delta, rope_delta);
+            for (size_t channel = 0; channel < sections; ++channel)
+                for (size_t token = 0; token < tokens; ++token)
+                    EXPECT_EQ(decode.data<int64_t>()[channel * tokens + token],
+                              (sections == 4 && channel == 0 ? 11 : 8) + token);
+        }
+        const auto cached = embedder.get_position_ids(3, 11);
+        const auto decode = embedder.get_generation_phase_position_ids(3, 11, *rope_delta);
+        EXPECT_EQ(cached.second, rope_delta);
+        EXPECT_EQ(
+            std::vector<int64_t>(cached.first.data<int64_t>(), cached.first.data<int64_t>() + cached.first.get_size()),
+            std::vector<int64_t>(decode.first.data<int64_t>(), decode.first.data<int64_t>() + decode.first.get_size()));
+    }
+}
+
+TEST(GGUFMultimodal, MiniCPMLearnedPositionBucketsPreserveProcessorResize) {
+    using namespace ov::genai;
+    auto models = gemma4_models();
+    models.config = VLMConfig(nlohmann::json{{"model_type", "minicpmv4_7"},
+                                             {"hidden_size", 1},
+                                             {"vision_config", {{"image_size", 980}, {"window_kernel_size", {2}}}},
+                                             {"merge_kernel_size", {2}}});
+    models.processor_config.patch_size = 14;
+    models.processor_config.image_size = 448;
+    models.processor_config.scale_resolution = 448;
+    models.processor_config.max_slice_nums = 1;
+    auto pixels = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{1, 3, 14, -1});
+    pixels->output(0).set_names({"pixel_values"});
+    auto positions = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{-1});
+    positions->output(0).set_names({"position_ids"});
+    auto window = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{-1});
+    window->output(0).set_names({"window_index"});
+    auto merge = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{-1});
+    merge->output(0).set_names({"merge_index"});
+    std::vector<int64_t> indices;
+    for (int64_t y = 0; y < 32; y += 4)
+        for (int64_t x = 0; x < 32; x += 4)
+            indices.push_back(y * 32 + x);
+    auto selected = std::make_shared<ov::op::v8::Gather>(positions,
+                                                         ov::op::v0::Constant::create(ov::element::i64, {64}, indices),
+                                                         ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+    auto output =
+        std::make_shared<ov::op::v1::Reshape>(std::make_shared<ov::op::v0::Convert>(selected, ov::element::f32),
+                                              ov::op::v0::Constant::create(ov::element::i64, {2}, {64, 1}),
+                                              false);
+    models.models["vision_embeddings"] =
+        std::make_shared<ov::Model>(ov::OutputVector{output}, ov::ParameterVector{pixels, positions, window, merge});
+    VisionEncoderMiniCPMv4_7 encoder(models, "CPU", {});
+    ov::Tensor image(ov::element::u8, {1, 448, 448, 3});
+    std::fill_n(image.data<uint8_t>(), image.get_size(), 128);
+    const auto encoded = encoder.encode(image, {});
+    ASSERT_EQ(encoded.crop_sizes.size(), 1);
+    EXPECT_EQ(encoded.crop_sizes[0].height, 32);
+    EXPECT_EQ(encoded.crop_sizes[0].width, 32);
+    ASSERT_EQ(encoded.resized_source.get_shape(), (ov::Shape{64, 1}));
+    const std::vector<int64_t> buckets{0, 8, 17, 26, 35, 43, 52, 61};
+    for (size_t y = 0; y < buckets.size(); ++y)
+        for (size_t x = 0; x < buckets.size(); ++x)
+            EXPECT_EQ(encoded.resized_source.data<const float>()[y * buckets.size() + x],
+                      float(buckets[y] * 70 + buckets[x]));
+}
+
+TEST(GGUFMultimodal, Gemma3nPaddingPlaceholderPreservesImageAndPerLayerSpans) {
+    using namespace ov::genai;
+    auto tokenizer_config = sentencepiece_config();
+    auto tokens = tokenizer_config.config.at("tokens").as<std::vector<std::string>>();
+    std::swap(tokens[0], tokens[3]);
+    tokenizer_config.config["tokens"] = tokens;
+    auto types = tokenizer_config.config.at("token_type").as<ov::Tensor>();
+    std::swap(types.data<int32_t>()[0], types.data<int32_t>()[3]);
+    tokenizer_config.config.at("padding_token_id").as<ov::Tensor>().data<uint32_t>()[0] = 0;
+    tokenizer_config.config.at("unknown_token_id").as<ov::Tensor>().data<uint32_t>()[0] = 3;
+    GGUFTokenizer tokenizer(tokenizer_config);
+    EXPECT_EQ(std::count(tokens.begin(), tokens.end(), "<image_soft_token>"), 0);
+    const auto placeholder = tokenizer.encode("<pad>", add_special_tokens(false)).input_ids;
+    ASSERT_EQ(placeholder.get_size(), 1);
+    EXPECT_EQ(placeholder.data<int64_t>()[0], 0);
+    auto models = gemma4_models();
+    models.config.model_type = VLMModelType::GEMMA3N;
+    models.config.image_soft_token = "<pad>";
+    const size_t layers = 2, width = 3;
+    std::vector<float> rows(vocab_size * layers * width);
+    for (size_t token = 0; token < vocab_size; ++token)
+        std::fill_n(rows.data() + token * layers * width, layers * width, float(token));
+    auto ids = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{1, -1});
+    ids->output(0).set_names({"input_ids"});
+    auto lookup = std::make_shared<ov::op::v8::Gather>(
+        ov::op::v0::Constant::create(ov::element::f32, {vocab_size, layers * width}, rows),
+        ids,
+        ov::op::v0::Constant::create(ov::element::i64, {}, {0}));
+    auto per_layer = std::make_shared<ov::op::v1::Reshape>(
+        lookup,
+        ov::op::v0::Constant::create(ov::element::i64, {4}, std::vector<int64_t>{0, 0, layers, width}),
+        true);
+    models.models["text_embeddings_per_layer"] =
+        std::make_shared<ov::Model>(ov::OutputVector{per_layer}, ov::ParameterVector{ids});
+    InputsEmbedderGemma3n embedder(models, tokenizer, "CPU", {});
+    embedder.set_apply_chat_template_status(false);
+    std::vector<EncodedImage> images;
+    for (const auto value : {7.f, 11.f}) {
+        images.push_back(EncodedImage{ov::Tensor(ov::element::f32, {1, 256, 4})});
+        std::fill_n(images.back().resized_source.data<float>(), images.back().resized_source.get_size(), value);
+    }
+    const auto normalized = embedder.normalize_prompt("a<ov_genai_image_1><ov_genai_image_0>b", 0, images);
+    EXPECT_EQ(normalized.images_sequence, (std::vector<size_t>{1, 0}));
+    const auto encoded = tokenizer.encode(normalized.unified_prompt).input_ids;
+    EXPECT_EQ(std::count(encoded.data<int64_t>(), encoded.data<int64_t>() + encoded.get_size(), 0), 512);
+    VLMPerfMetrics metrics;
+    const auto embeddings =
+        embedder.get_inputs_embeds(normalized.unified_prompt, images, metrics, true, normalized.images_sequence);
+    ASSERT_EQ(embeddings.get_shape(), (ov::Shape{1, encoded.get_size(), 4}));
+    const auto& extra = embedder.get_lm_extra_inputs().at("per_layer_inputs");
+    ASSERT_EQ(extra.get_shape(), (ov::Shape{1, encoded.get_size(), layers, width}));
+    size_t image_tokens = 0;
+    for (size_t token = 0; token < encoded.get_size(); ++token) {
+        const auto token_id = encoded.data<const int64_t>()[token];
+        if (token_id == 0) {
+            const auto expected = image_tokens++ < 256 ? 11.f : 7.f;
+            for (size_t channel = 0; channel < 4; ++channel)
+                EXPECT_EQ(embeddings.data<const float>()[token * 4 + channel], expected);
+        } else {
+            for (size_t channel = 0; channel < 4; ++channel)
+                EXPECT_EQ(embeddings.data<const float>()[token * 4 + channel], 0.25f);
+        }
+        for (size_t channel = 0; channel < layers * width; ++channel)
+            EXPECT_EQ(extra.data<const float>()[token * layers * width + channel], float(token_id));
+    }
+    EXPECT_EQ(image_tokens, 512);
 }
 
 TEST(GGUFMultimodal, BoundedResizeKeepsNativeAreaBetweenTokenLimits) {

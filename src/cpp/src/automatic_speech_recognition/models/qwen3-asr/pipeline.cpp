@@ -97,6 +97,30 @@ ASRDecodedResults Qwen3ASR::generate(const AudioInputs& audio_inputs,
     return results;
 }
 
+Qwen3ASR::Qwen3ASR(const Tokenizer& tokenizer,
+                   const std::shared_ptr<ov::Model>& encoder,
+                   const std::shared_ptr<ov::Model>& decoder,
+                   const std::shared_ptr<ov::Model>& embeddings,
+                   size_t mel_bins,
+                   const std::string& device,
+                   const ov::AnyMap& properties)
+    : ASRPipelineImplBase(tokenizer),
+      m_feature_extractor(mel_bins, 16000, 400, 160),
+      m_asr_text_token_id(get_required_token_id(tokenizer, "<asr_text>")) {
+    auto runtime = properties;
+    erase_allowed_asr_ctor_properties(runtime);
+    if (const auto it = properties.find(ov::genai::forced_aligner.name()); it != properties.end())
+        m_forced_aligner = it->second.as<std::shared_ptr<ASRForcedAligner>>();
+    m_encoder = std::make_unique<Qwen3ASREncoder>(encoder, device, runtime);
+    m_decoder = std::make_unique<Qwen3ASRDecoder>(decoder,
+                                                  embeddings,
+                                                  get_required_token_id(tokenizer, "<|audio_pad|>"),
+                                                  device,
+                                                  runtime);
+    m_generation_config.set_eos_token_id(tokenizer.get_eos_token_id());
+    m_generation_config.stop_token_ids.insert(get_required_token_id(tokenizer, "<|im_end|>"));
+}
+
 std::vector<std::string> Qwen3ASR::build_text_prompt(size_t batch_size, const ASRGenerationConfig& config) {
     std::string context;
     if (config.context.has_value()) {
@@ -313,7 +337,8 @@ std::vector<std::string> Qwen3ASR::infer(std::vector<AudioChunk> chunks,
     return results;
 }
 
-ASRGenerationConfig Qwen3ASR::resolve_generation_config(const std::optional<ASRGenerationConfig>& generation_config) const {
+ASRGenerationConfig Qwen3ASR::resolve_generation_config(
+    const std::optional<ASRGenerationConfig>& generation_config) const {
     ASRGenerationConfig config = generation_config.value_or(m_generation_config);
     if (config.stop_token_ids.empty()) {
         config.stop_token_ids = m_generation_config.stop_token_ids;

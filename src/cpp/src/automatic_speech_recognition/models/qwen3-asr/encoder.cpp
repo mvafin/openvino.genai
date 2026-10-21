@@ -22,6 +22,26 @@ Qwen3ASREncoder::Qwen3ASREncoder(const std::filesystem::path& models_path,
 }
 
 ov::Tensor Qwen3ASREncoder::encode(const WhisperFeatures& features) {
+    if (m_gguf) {
+        const auto chunks = (features.n_frames + 99) / 100;
+        OPENVINO_ASSERT(chunks > 0, "Qwen3-ASR audio must produce mel frames");
+        const auto padded = chunks * 100;
+        ov::Tensor input(ov::element::f32, {1, features.feature_size, 1, padded});
+        std::fill_n(input.data<float>(), input.get_size(), 0.f);
+        for (size_t band = 0; band < features.feature_size; ++band)
+            std::copy_n(features.data.data() + band * features.n_frames,
+                        features.n_frames,
+                        input.data<float>() + band * padded);
+        m_request.set_tensor("features", input);
+        m_request.infer();
+        const auto encoded = m_request.get_tensor("audio_features");
+        const auto hidden = encoded.get_shape().back();
+        const auto tail = features.n_frames - (chunks - 1) * 100;
+        ov::Tensor output(ov::element::f32, {1, (chunks - 1) * 13 + (tail + 7) / 8, hidden});
+        OPENVINO_ASSERT(encoded.get_size() == chunks * 13 * hidden, "Unexpected GGUF ASR encoder geometry");
+        std::copy_n(encoded.data<const float>(), output.get_size(), output.data<float>());
+        return output;
+    }
     const size_t remainder_frames = features.n_frames % m_encoder_chunk_frames;
 
     ov::Tensor input_tensor = chunk_mel_features(features);
@@ -39,6 +59,14 @@ ov::Tensor Qwen3ASREncoder::encode(const WhisperFeatures& features) {
     m_request.set_tensor("input_features", ov::Tensor(ov::element::f32, {0, 0, 0}));
 
     return output;
+}
+
+Qwen3ASREncoder::Qwen3ASREncoder(const std::shared_ptr<ov::Model>& model,
+                                 const std::string& device,
+                                 const ov::AnyMap& properties)
+    : m_model_config(std::filesystem::path{}),
+      m_gguf(true) {
+    m_request = utils::singleton_core().compile_model(model, device, properties).create_infer_request();
 }
 
 ov::Tensor Qwen3ASREncoder::chunk_mel_features(const WhisperFeatures& features) {

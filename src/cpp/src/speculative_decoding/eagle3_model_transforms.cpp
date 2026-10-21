@@ -4,20 +4,25 @@
 #include "eagle3_model_transforms.hpp"
 
 #include <fstream>
-#include <string>
 #include <nlohmann/json.hpp>
+#include <numeric>
+#include <string>
 
 #include "json_utils.hpp"
 #include "logger.hpp"
 #include "openvino/op/add.hpp"
 #include "openvino/op/concat.hpp"
+#include "openvino/op/convert.hpp"
 #include "openvino/op/gather.hpp"
 #include "openvino/op/matmul.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/parameter.hpp"
+#include "openvino/op/reshape.hpp"
 #include "openvino/op/result.hpp"
 #include "openvino/op/scaled_dot_product_attention.hpp"
 #include "openvino/op/scatter_update.hpp"
+#include "openvino/op/squeeze.hpp"
+#include "openvino/op/unsqueeze.hpp"
 #include "utils.hpp"
 
 namespace ov {
@@ -87,19 +92,30 @@ void apply_eagle3_rt_info(std::shared_ptr<ov::Model>& model, ov::AnyMap& propert
 std::shared_ptr<ov::Node> find_embedding_gather(const std::shared_ptr<ov::Model>& model) {
     constexpr size_t MIN_VOCAB_SIZE_THRESHOLD = 1000;
     for (const auto& node : model->get_ordered_ops()) {
-        auto gather = std::dynamic_pointer_cast<ov::op::util::GatherBase>(node);
-        if (!gather) 
+        if (!node->get_rt_info().count("gguf.token_embedding"))
             continue;
+        auto embedding = node;
+        while (ov::is_type<ov::op::v1::Reshape>(embedding) || ov::is_type<ov::op::v0::Squeeze>(embedding) ||
+               ov::is_type<ov::op::v0::Unsqueeze>(embedding))
+            embedding = embedding->input_value(0).get_node_shared_ptr();
+        if (ov::is_type<ov::op::v8::Gather>(embedding))
+            return embedding;
+    }
+    for (const auto& node : model->get_ordered_ops()) {
+        auto gather = std::dynamic_pointer_cast<ov::op::util::GatherBase>(node);
+        if (!gather)
+            continue;
+        if (gather->get_rt_info().count("gguf.token_embedding"))
+            return gather;
         // [vocab, hidden_size] * [batch, seq_len] -> [batch, seq_len, hidden_size]
         auto data_node = gather->input_value(0).get_node_shared_ptr();
         auto indices_node = gather->input_value(1).get_node_shared_ptr();
-        if (!data_node || !indices_node) 
+        if (!data_node || !indices_node)
             continue;
         // indices_node should be on parameter path, maybe this is better rule
         ov::PartialShape ps = data_node->get_output_partial_shape(0);
         if (ps.rank().is_static() && ps.rank().get_length() >= 2) {
-            if (ps[0].is_static() && 
-                ps[0].get_length() > MIN_VOCAB_SIZE_THRESHOLD) { // Heuristic: vocab size > 1000
+            if (ps[0].is_static() && ps[0].get_length() > MIN_VOCAB_SIZE_THRESHOLD) {  // Heuristic: vocab size > 1000
                 return gather;
             }
         }
@@ -141,7 +157,42 @@ std::shared_ptr<ov::Node> clone_node_recursive(const std::shared_ptr<ov::Node>& 
     return cloned;
 }
 
+void attach_gguf_target_weights(const std::shared_ptr<ov::Model>& main_model,
+                                const std::shared_ptr<ov::Model>& draft_model) {
+    const auto parameters = draft_model->get_parameters();
+    for (const auto& parameter : parameters) {
+        const auto& name = parameter->get_friendly_name();
+        ov::Output<ov::Node> source;
+        if (name == "gguf.target_token_embedding") {
+            auto gather = find_embedding_gather(main_model);
+            OPENVINO_ASSERT(gather, "GGUF draft requires target token embeddings");
+            source = gather->input_value(0);
+        } else if (name == "gguf.target_lm_head") {
+            auto head = ov::as_type_ptr<ov::op::v0::MatMul>(std::get<0>(find_llm_matmul(main_model)));
+            OPENVINO_ASSERT(head && head->get_transpose_b(), "GGUF draft requires a target output projection");
+            source = head->input_value(1);
+        } else {
+            continue;
+        }
+        OPENVINO_ASSERT(parameter->get_partial_shape().compatible(source.get_partial_shape()),
+                        "GGUF draft and target weight dimensions differ: ",
+                        name);
+        std::unordered_map<ov::Node*, std::shared_ptr<ov::Node>> cloned_nodes;
+        auto cloned = clone_node_recursive(source.get_node_shared_ptr(), cloned_nodes);
+        auto value = cloned->output(source.get_index());
+        if (value.get_element_type() != parameter->get_element_type())
+            value = std::make_shared<ov::op::v0::Convert>(value, parameter->get_element_type());
+        parameter->output(0).replace(value);
+        draft_model->remove_parameter(parameter);
+    }
+    draft_model->validate_nodes_and_infer_types();
+}
+
 void share_vocabulary(const std::shared_ptr<ov::Model>& main_model, const std::shared_ptr<ov::Model>& draft_model) {
+    if (draft_model->has_rt_info("gguf_architecture")) {
+        attach_gguf_target_weights(main_model, draft_model);
+        return;
+    }
     // extract embedding weight from main model
     auto main_gather = find_embedding_gather(main_model);
     auto draft_gather = find_embedding_gather(draft_model);
@@ -171,6 +222,42 @@ void share_vocabulary(const std::shared_ptr<ov::Model>& main_model, const std::s
 }
 
 void move_fc_from_draft_to_main(std::shared_ptr<ov::Model>& draft_model, std::shared_ptr<ov::Model>& main_model) {
+    if (draft_model->has_rt_info("gguf_architecture")) {
+        std::shared_ptr<ov::op::v0::Parameter> hidden;
+        for (const auto& parameter : draft_model->get_parameters())
+            if (parameter->output(0).get_names().count("hidden_states"))
+                hidden = parameter;
+        std::shared_ptr<ov::Node> fc;
+        for (const auto& node : draft_model->get_ordered_ops())
+            if (node->get_friendly_name().find("eagle3.fc") != std::string::npos)
+                fc = node;
+        OPENVINO_ASSERT(hidden && fc, "Missing GGUF Eagle3 encoder boundary");
+        auto encoder = std::make_shared<ov::Model>(ov::OutputVector{fc}, ov::ParameterVector{hidden})->clone();
+        const auto width = fc->get_output_partial_shape(0)[3];
+        auto projected_shape = hidden->get_partial_shape();
+        projected_shape[2] = width;
+        hidden->set_partial_shape(projected_shape);
+        auto projected =
+            std::make_shared<ov::op::v0::Unsqueeze>(hidden, ov::op::v0::Constant::create(ov::element::i64, {1}, {1}));
+        fc->output(0).replace(projected);
+        bool attached = false;
+        for (const auto& result : main_model->get_results()) {
+            if (!result->output(0).get_names().count("last_hidden_state"))
+                continue;
+            encoder->get_parameters().front()->output(0).replace(result->input_value(0));
+            auto output =
+                std::make_shared<ov::op::v0::Squeeze>(encoder->get_results().front()->input_value(0),
+                                                      ov::op::v0::Constant::create(ov::element::i64, {1}, {1}));
+            output->set_friendly_name("eagle3_hidden_state_fc");
+            result->input(0).replace_source_output(output);
+            attached = true;
+            break;
+        }
+        OPENVINO_ASSERT(attached, "Missing target hidden-state output for GGUF Eagle3");
+        draft_model->validate_nodes_and_infer_types();
+        main_model->validate_nodes_and_infer_types();
+        return;
+    }
     // extract the FC transform weight from draft model
     auto remove_fc_and_rewire = [](const std::shared_ptr<ov::Model>& model) -> std::shared_ptr<ov::Node> {
         for (const auto& node : model->get_ordered_ops()) {
@@ -227,6 +314,15 @@ std::shared_ptr<ov::op::v0::Constant> extract_d2t_mapping_table(const std::share
         model->validate_nodes_and_infer_types();
         return constant;
     }
+    if (model->has_rt_info("gguf_architecture")) {
+        const auto shape = model->output("logits").get_partial_shape();
+        OPENVINO_ASSERT(shape.rank().is_static() && shape.rank().get_length() > 0 &&
+                            shape[shape.rank().get_length() - 1].is_static(),
+                        "GGUF draft vocabulary must be resolved before extracting the token mapping");
+        std::vector<int64_t> mapping(shape[shape.rank().get_length() - 1].get_length());
+        std::iota(mapping.begin(), mapping.end(), int64_t{0});
+        return ov::op::v0::Constant::create(ov::element::i64, {mapping.size()}, mapping);
+    }
     return nullptr;
 }
 
@@ -236,7 +332,7 @@ bool is_hidden_state_residual_node(const std::shared_ptr<ov::Node>& node) {
     if (const auto& add = ov::as_type_ptr<ov::op::v1::Add>(node)) {
         auto input1 = add->get_input_node_shared_ptr(1);
         auto matmul = ov::as_type_ptr<ov::op::v0::MatMul>(input1);
-        if (!matmul) 
+        if (!matmul)
             return false;
         auto matmul_input = matmul->get_input_node_shared_ptr(0);
         return matmul_input && ov::is_type<ov::op::v1::Multiply>(matmul_input);
@@ -244,13 +340,12 @@ bool is_hidden_state_residual_node(const std::shared_ptr<ov::Node>& node) {
     return false;
 }
 
-std::vector<ov::Output<ov::Node>> find_hidden_state_outputs_by_patterns(
-    const std::shared_ptr<ov::Model>& model,
-    const std::vector<std::string>& patterns) {
+std::vector<ov::Output<ov::Node>> find_hidden_state_outputs_by_patterns(const std::shared_ptr<ov::Model>& model,
+                                                                        const std::vector<std::string>& patterns) {
     std::vector<ov::Output<ov::Node>> residual_outputs(patterns.size());
     std::vector<bool> found_outputs(patterns.size(), false);
     for (const auto& node : model->get_ordered_ops()) {
-        if (!is_hidden_state_residual_node(node)) 
+        if (!is_hidden_state_residual_node(node))
             continue;
         const std::string& name = node->get_friendly_name();
         for (size_t idx = 0; idx < patterns.size(); ++idx) {
@@ -277,6 +372,23 @@ std::vector<ov::Output<ov::Node>> find_hidden_state_outputs_by_patterns(
 std::vector<ov::Output<ov::Node>> find_decoder_layer_hidden_state_outputs(
     const std::shared_ptr<ov::Model>& model,
     const std::vector<int32_t>& decoder_layer_ids) {
+    if (model->has_rt_info("gguf_architecture")) {
+        std::vector<ov::Output<ov::Node>> outputs;
+        for (const auto layer : decoder_layer_ids) {
+            const auto suffix = "blk." + std::to_string(layer) + ".l_out";
+            std::shared_ptr<ov::Node> found;
+            for (const auto& node : model->get_ordered_ops()) {
+                const auto& name = node->get_friendly_name();
+                if (name.size() >= suffix.size() &&
+                    name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
+                    found = node;
+            }
+            OPENVINO_ASSERT(found, "Missing GGUF decoder layer output: ", layer);
+            outputs.push_back(
+                std::make_shared<ov::op::v0::Squeeze>(found, ov::op::v0::Constant::create(ov::element::i64, {1}, {1})));
+        }
+        return outputs;
+    }
     std::vector<std::string> patterns;
     patterns.reserve(decoder_layer_ids.size());
     for (int32_t idx : decoder_layer_ids) {
@@ -286,6 +398,17 @@ std::vector<ov::Output<ov::Node>> find_decoder_layer_hidden_state_outputs(
 }
 
 void transform_hidden_state(std::shared_ptr<ov::Model>& model, const std::vector<int32_t>& hidden_layers_to_abstract) {
+    if (hidden_layers_to_abstract.size() == 1 && hidden_layers_to_abstract.front() == -1 &&
+        model->has_rt_info("gguf_architecture")) {
+        const auto outputs = model->outputs();
+        OPENVINO_ASSERT(std::any_of(outputs.begin(),
+                                    outputs.end(),
+                                    [](const auto& output) {
+                                        return output.get_names().count("last_hidden_state");
+                                    }),
+                        "Missing GGUF Eagle3 prenorm hidden-state output");
+        return;
+    }
     if (hidden_layers_to_abstract.empty()) {
         return;
     }

@@ -78,6 +78,9 @@ std::shared_ptr<ov::Node> clone_node_recursive(const std::shared_ptr<ov::Node>& 
  */
 void share_vocabulary(const std::shared_ptr<ov::Model>& main_model, const std::shared_ptr<ov::Model>& draft_model);
 
+void attach_gguf_target_weights(const std::shared_ptr<ov::Model>& main_model,
+                                const std::shared_ptr<ov::Model>& draft_model);
+
 /**
  * @brief Moves FC layer from draft model to main model.
  * @param draft_model Draft model (modified to remove FC layer).

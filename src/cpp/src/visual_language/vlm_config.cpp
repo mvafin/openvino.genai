@@ -94,6 +94,8 @@ VLMConfig::VLMConfig(const nlohmann::json& parsed) {
 
     // gemma4
     read_json_param(parsed, "text_config.hidden_size_per_layer_input", hidden_size_per_layer_input);
+    read_json_param(parsed, "audio_token_id", audio_token_id);
+
     // For gemma3 `text_config.use_bidirectional_attention` can be absent or boolean
     if (parsed.contains("text_config") && parsed.at("text_config").contains("use_bidirectional_attention") &&
         parsed.at("text_config").at("use_bidirectional_attention").is_string()) {
@@ -109,6 +111,9 @@ VLMConfig::VLMConfig(const nlohmann::json& parsed) {
 
     // MiniCPM-V 4.7
     if (model_type == VLMModelType::MINICPMV4_7) {
+        read_json_param(parsed, "position_ids_sections", position_ids_sections);
+        OPENVINO_ASSERT(position_ids_sections == 3 || position_ids_sections == 4,
+                        "MiniCPM position_ids must have three or four sections");
         read_json_param(parsed, "vision_config.image_size", vision_config_image_size);
         std::vector<size_t> window_kernel_size_vec;
         read_json_param(parsed, "vision_config.window_kernel_size", window_kernel_size_vec);

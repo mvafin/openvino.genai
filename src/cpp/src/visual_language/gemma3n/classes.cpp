@@ -47,6 +47,22 @@ EncodedImage VisionEncoderGemma3n::encode(const ov::Tensor& image, const ov::Any
     return {std::move(image_features)};
 }
 
+InputsEmbedderGemma3n::InputsEmbedderGemma3n(const VLMModels& models,
+                                             const Tokenizer& tokenizer,
+                                             const std::string& device,
+                                             const ov::AnyMap& properties)
+    : IInputsEmbedder(models, tokenizer, device, properties) {
+    auto compiled = utils::singleton_core().compile_model(
+        models.at("text_embeddings_per_layer"),
+        device,
+        utils::get_model_properties(properties, "text_embeddings_per_layer", device));
+    m_per_layer_embeddings_requests = std::make_unique<CircularBufferQueue<ov::InferRequest>>(
+        compiled.get_property(ov::optimal_number_of_infer_requests),
+        [&compiled] {
+            return compiled.create_infer_request();
+        });
+}
+
 InputsEmbedderGemma3n::InputsEmbedderGemma3n(const VLMConfig& vlm_config,
                                              const std::filesystem::path& model_dir,
                                              const Tokenizer& tokenizer,
@@ -176,7 +192,7 @@ ov::Tensor InputsEmbedderGemma3n::get_inputs_embeds(const std::string& prompt,
 std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderGemma3n::get_position_ids(const size_t inputs_embeds_size,
                                                                                       const size_t history_size) {
     // position_ids in Gemma3n are 1-indexed (same as Gemma3)
-    return IInputsEmbedder::get_position_ids(inputs_embeds_size, history_size + 1);
+    return IInputsEmbedder::get_position_ids(inputs_embeds_size, history_size + m_vlm_config.position_ids_offset);
 }
 
 std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderGemma3n::get_generation_phase_position_ids(
@@ -184,7 +200,7 @@ std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedderGemma3n::get_generat
     const size_t history_size,
     int64_t rope_delta) {
     // position_ids in Gemma3n are 1-indexed (same as Gemma3)
-    return IInputsEmbedder::get_position_ids(inputs_embeds_size, history_size + 1);
+    return IInputsEmbedder::get_position_ids(inputs_embeds_size, history_size + m_vlm_config.position_ids_offset);
 }
 
 const std::unordered_map<std::string, ov::Tensor>& InputsEmbedderGemma3n::get_lm_extra_inputs() const {

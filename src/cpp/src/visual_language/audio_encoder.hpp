@@ -21,6 +21,7 @@ enum class AudioEncoderType {
     GEMMA4,          // log-mel spectrogram input, 30 s chunks
     GEMMA4_UNIFIED,  // raw 640-sample waveform frames
     LFM2,            // normalized log-mel features plus relative position embeddings
+    QWEN3,
 };
 
 struct AudioEncoderConfig {

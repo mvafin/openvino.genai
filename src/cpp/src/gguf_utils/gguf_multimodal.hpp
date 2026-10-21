@@ -4,6 +4,7 @@
 #pragma once
 
 #include <set>
+#include <vector>
 
 #include "openvino/core/model.hpp"
 #include "openvino/genai/extensions.hpp"
@@ -26,6 +27,8 @@ struct GGUFMultimodalModels {
         return config;
     }
 };
+
+std::vector<size_t> gguf_qwen3vl_deepstack_visual_indexes(const std::shared_ptr<ov::Model>& merger);
 
 GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
                                           const std::filesystem::path& mmproj,

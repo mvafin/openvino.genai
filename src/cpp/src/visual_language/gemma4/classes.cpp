@@ -10,6 +10,7 @@
 #include <numeric>
 #include <regex>
 #include <sstream>
+#include <string_view>
 
 #include "logger.hpp"
 #include "utils.hpp"
@@ -194,6 +195,22 @@ void fill_video_metadata(ov::genai::VideoMetadata& video_metadata,
     for (size_t i = 0; i < num_frames; ++i) {
         video_metadata.frames_indices.push_back(static_cast<size_t>(static_cast<double>(i) * step));
     }
+}
+
+int64_t get_gemma4_token_type(int64_t input_id,
+                              int64_t image_token_id,
+                              int64_t video_token_id,
+                              int64_t audio_token_id) {
+    if (input_id == image_token_id) {
+        return 1;
+    }
+    if (input_id == video_token_id) {
+        return 2;
+    }
+    if (input_id == audio_token_id) {
+        return 3;
+    }
+    return 0;
 }
 
 }  // namespace
@@ -494,8 +511,8 @@ NormalizedPrompt InputsEmbedderGemma4::normalize_prompt(const std::string& promp
                                                         const std::vector<ov::genai::EncodedAudio>& audios) const {
     auto result = normalize_prompt(prompt, base_image_id, base_video_id, images, videos);
     // Runs even without audios so that a stray <ov_genai_audio_N> is rejected.
-    std::tie(result.unified_prompt, result.audios_sequence) = normalize(
-        result.unified_prompt, AUDIO_TOKEN, AUDIO_TOKEN, base_audio_id, audios.size(), ModalityType::AUDIO);
+    std::tie(result.unified_prompt, result.audios_sequence) =
+        normalize(result.unified_prompt, AUDIO_TOKEN, AUDIO_TOKEN, base_audio_id, audios.size(), ModalityType::AUDIO);
     // Grow each single placeholder to the encoder's token count, wrapped in the audio markers.
     size_t search_offset = 0;
     for (size_t audio_id : result.audios_sequence) {
@@ -587,7 +604,10 @@ ov::Tensor InputsEmbedderGemma4::get_per_layer_embeddings(const ov::Tensor& inpu
 
     const ov::Tensor& output = req.get_output_tensor();
     ov::Tensor result(output.get_element_type(), output.get_shape());
-    output.copy_to(result);
+    // Avoid copy_to() for zero-sized outputs because it may invoke memcpy with null tensor data.
+    if (output.get_size() > 0) {
+        output.copy_to(result);
+    }
     return result;
 }
 
@@ -607,8 +627,7 @@ ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(
     bool recalculate_merged_embeddings,
     const std::vector<size_t>& images_sequence,
     const std::vector<size_t>& videos_sequence,
-    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count
-) {
+    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) {
     return get_inputs_embeds(prompt,
                              images,
                              videos,
@@ -631,8 +650,7 @@ ov::Tensor InputsEmbedderGemma4::get_inputs_embeds(
     const std::vector<size_t>& images_sequence,
     const std::vector<size_t>& videos_sequence,
     const std::vector<size_t>& audios_sequence,
-    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count
-) {
+    const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) {
     std::vector<ov::Tensor> image_embeds;
     image_embeds.reserve(images_sequence.size());
     for (size_t new_image_id : images_sequence) {
@@ -726,7 +744,8 @@ ov::Tensor InputsEmbedderGemma4::get_token_type_ids(const ov::Tensor& input_ids)
     ov::Tensor token_type_ids(ov::element::i64, input_ids.get_shape());
     int64_t* token_type_data = token_type_ids.data<int64_t>();
     for (size_t i = 0; i < num_elements; ++i) {
-        token_type_data[i] = (input_ids_data[i] == m_image_token_id || input_ids_data[i] == m_video_token_id) ? 1 : 0;
+        token_type_data[i] =
+            get_gemma4_token_type(input_ids_data[i], m_image_token_id, m_video_token_id, m_vlm_config.audio_token_id);
     }
     return token_type_ids;
 }

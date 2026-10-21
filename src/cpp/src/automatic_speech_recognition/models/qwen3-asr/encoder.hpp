@@ -13,12 +13,14 @@ namespace ov::genai {
 class Qwen3ASREncoder {
 public:
     Qwen3ASREncoder(const std::filesystem::path& models_path, const std::string& device, const ov::AnyMap& properties);
+    Qwen3ASREncoder(const std::shared_ptr<ov::Model>& model, const std::string& device, const ov::AnyMap& properties);
 
     ov::Tensor encode(const WhisperFeatures& features);
 
 private:
     InferRequest m_request;
     Qwen3ASRConfig m_model_config;
+    bool m_gguf = false;
 
     // The original Qwen3-ASR encoder processes mel spectrograms in chunks of n_window * 2 frames
     // and applies positional embeddings independently to each chunk.

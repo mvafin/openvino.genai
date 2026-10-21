@@ -18,18 +18,16 @@ namespace ov::genai {
 
 class VisionEncoderMiniCPMv4_7 : public VisionEncoder {
 public:
-    VisionEncoderMiniCPMv4_7(
-        const std::filesystem::path& model_dir,
-        const std::string& device,
-        const ov::AnyMap properties
-    );
+    VisionEncoderMiniCPMv4_7(const VLMModels& models, const std::string& device, const ov::AnyMap& properties);
 
-    VisionEncoderMiniCPMv4_7(
-        const ModelsMap& models_map,
-        const std::filesystem::path& config_dir_path,
-        const std::string& device,
-        const ov::AnyMap device_config
-    );
+    VisionEncoderMiniCPMv4_7(const std::filesystem::path& model_dir,
+                             const std::string& device,
+                             const ov::AnyMap properties);
+
+    VisionEncoderMiniCPMv4_7(const ModelsMap& models_map,
+                             const std::filesystem::path& config_dir_path,
+                             const std::string& device,
+                             const ov::AnyMap device_config);
 
     EncodedImage encode(const ov::Tensor& image, const ov::AnyMap& config_map) override;
 
@@ -42,39 +40,36 @@ private:
 
     // Runs the vision graph once per crop and concatenates the outputs into a single
     // [total_tokens, hidden_size] tensor. Shared by the image and video paths.
-    ov::Tensor encode_crops(
-        const std::vector<clip_image_u8>& crops,
-        const std::vector<ImageSize>& crop_sizes,
-        const ProcessorConfig& config
-    );
+    ov::Tensor encode_crops(const std::vector<clip_image_u8>& crops,
+                            const std::vector<ImageSize>& crop_sizes,
+                            const ProcessorConfig& config);
 };
 
 class InputsEmbedderMiniCPMv4_7 : public InputsEmbedder::IInputsEmbedder {
 public:
-    InputsEmbedderMiniCPMv4_7(
-        const VLMConfig& vlm_config,
-        const std::filesystem::path& model_dir,
-        const Tokenizer& tokenizer,
-        const std::string& device,
-        const ov::AnyMap device_config
-    );
+    InputsEmbedderMiniCPMv4_7(const VLMModels& models,
+                              const Tokenizer& tokenizer,
+                              const std::string& device,
+                              const ov::AnyMap& properties);
 
-    InputsEmbedderMiniCPMv4_7(
-        const VLMConfig& vlm_config,
-        const ModelsMap& models_map,
-        const Tokenizer& tokenizer,
-        const std::filesystem::path& config_dir_path,
-        const std::string& device,
-        const ov::AnyMap device_config
-    );
+    InputsEmbedderMiniCPMv4_7(const VLMConfig& vlm_config,
+                              const std::filesystem::path& model_dir,
+                              const Tokenizer& tokenizer,
+                              const std::string& device,
+                              const ov::AnyMap device_config);
 
-    ov::Tensor get_inputs_embeds(
-        const std::string& prompt,
-        const std::vector<ov::genai::EncodedImage>& images,
-        ov::genai::VLMPerfMetrics& metrics,
-        bool recalculate_merged_embeddings = true,
-        const std::vector<size_t>& image_sequence = {}
-    ) override;
+    InputsEmbedderMiniCPMv4_7(const VLMConfig& vlm_config,
+                              const ModelsMap& models_map,
+                              const Tokenizer& tokenizer,
+                              const std::filesystem::path& config_dir_path,
+                              const std::string& device,
+                              const ov::AnyMap device_config);
+
+    ov::Tensor get_inputs_embeds(const std::string& prompt,
+                                 const std::vector<ov::genai::EncodedImage>& images,
+                                 ov::genai::VLMPerfMetrics& metrics,
+                                 bool recalculate_merged_embeddings = true,
+                                 const std::vector<size_t>& image_sequence = {}) override;
 
     ov::Tensor get_inputs_embeds(
         const std::string& prompt,
@@ -84,40 +79,33 @@ public:
         bool recalculate_merged_embeddings = true,
         const std::vector<size_t>& image_sequence = {},
         const std::vector<size_t>& videos_sequence = {},
-        const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count = {}
-    ) override;
+        const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count = {}) override;
 
-    std::vector<ov::genai::EncodedVideo>
-    encode_videos(const std::vector<ov::Tensor>& videos, const std::vector<VideoMetadata>& videos_metadata) override;
+    std::vector<ov::genai::EncodedVideo> encode_videos(const std::vector<ov::Tensor>& videos,
+                                                       const std::vector<VideoMetadata>& videos_metadata) override;
 
-    std::pair<ov::Tensor, std::optional<int64_t>>
-    get_position_ids(const size_t inputs_embeds_size, const size_t history_size) override;
+    std::pair<ov::Tensor, std::optional<int64_t>> get_position_ids(const size_t inputs_embeds_size,
+                                                                   const size_t history_size) override;
 
-    std::pair<ov::Tensor, std::optional<int64_t>> get_generation_phase_position_ids(
-        const size_t inputs_embeds_size,
-        const size_t history_size,
-        int64_t rope_delta
-    ) override;
+    std::pair<ov::Tensor, std::optional<int64_t>> get_generation_phase_position_ids(const size_t inputs_embeds_size,
+                                                                                    const size_t history_size,
+                                                                                    int64_t rope_delta) override;
 
     void start_chat(const std::string& system_message) override;
 
     void finish_chat() override;
 
-    NormalizedPrompt normalize_prompt(
-        const std::string& prompt,
-        size_t base_id,
-        const std::vector<EncodedImage>& images
-    ) const override {
+    NormalizedPrompt normalize_prompt(const std::string& prompt,
+                                      size_t base_id,
+                                      const std::vector<EncodedImage>& images) const override {
         return normalize_prompt(prompt, base_id, 0, images, {});
     }
 
-    NormalizedPrompt normalize_prompt(
-        const std::string& prompt,
-        size_t base_image_id,
-        size_t base_video_id,
-        const std::vector<EncodedImage>& images,
-        const std::vector<EncodedVideo>& videos
-    ) const override;
+    NormalizedPrompt normalize_prompt(const std::string& prompt,
+                                      size_t base_image_id,
+                                      size_t base_video_id,
+                                      const std::vector<EncodedImage>& images,
+                                      const std::vector<EncodedVideo>& videos) const override;
 
 private:
     void encode_vision_token_ids();

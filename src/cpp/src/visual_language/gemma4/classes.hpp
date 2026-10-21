@@ -62,11 +62,6 @@ public:
         const std::vector<size_t>& videos_sequence = {},
         const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count = {}) override;
 
-    std::vector<ov::genai::EncodedImage> encode_images(const std::vector<ov::Tensor>& images) override;
-    /// @brief Encode each audio independently; the result is passed back in explicitly.
-    std::vector<ov::genai::EncodedAudio> encode_audios(const std::vector<ov::Tensor>& audios) override;
-
-    /// @brief Audio-aware overload. Places each audio at its own placeholder run.
     ov::Tensor get_inputs_embeds(const std::string& prompt,
                                  const std::vector<ov::genai::EncodedImage>& images,
                                  const std::vector<ov::genai::EncodedVideo>& videos,
@@ -77,6 +72,13 @@ public:
                                  const std::vector<size_t>& videos_sequence,
                                  const std::vector<size_t>& audios_sequence,
                                  const std::vector<std::pair<std::size_t, std::size_t>>& history_vision_count) override;
+
+    std::vector<ov::genai::EncodedImage> encode_images(const std::vector<ov::Tensor>& images) override;
+    /// @brief Encode each audio independently; the result is passed back in explicitly.
+    std::vector<ov::genai::EncodedAudio> encode_audios(const std::vector<ov::Tensor>& audios) override;
+
+    /// @brief Audio-aware overload. Places each audio at its own placeholder run.
+
     void set_audio_encoder(AudioEncode encoder) override {
         m_audio_encoder = std::move(encoder);
     }
@@ -136,7 +138,7 @@ private:
     }
 
     bool has_token_type_ids() const;
-    
+
     ov::Tensor get_token_type_ids(const ov::Tensor& input_ids);
 
     int64_t m_image_token_id = -1;

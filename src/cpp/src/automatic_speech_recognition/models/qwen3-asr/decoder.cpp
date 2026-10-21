@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstring>
 #include <map>
+#include <numeric>
 
 #include "openvino/genai/generation_handle.hpp"
 #include "sequence_group.hpp"
@@ -27,6 +28,45 @@ void Qwen3ASRDecoder::set_seed(size_t seed) {
     m_sampler.set_seed(seed);
 }
 
+Qwen3ASRDecoder::Qwen3ASRDecoder(const std::shared_ptr<ov::Model>& model,
+                                 const std::shared_ptr<ov::Model>& embeddings,
+                                 int64_t audio_token_id,
+                                 const std::string& device,
+                                 const ov::AnyMap& properties)
+    : m_audio_token_id(audio_token_id) {
+    m_request = utils::singleton_core().compile_model(model, device, properties).create_infer_request();
+    m_embeddings = utils::singleton_core().compile_model(embeddings, device, properties).create_infer_request();
+}
+
+void Qwen3ASRDecoder::prepare_gguf_inputs(const ov::Tensor& tokens, const ov::Tensor& audio) {
+    m_embeddings.set_tensor("input_ids", tokens);
+    m_embeddings.infer();
+    const auto embeddings = m_embeddings.get_output_tensor();
+    ov::Tensor input(embeddings.get_element_type(), embeddings.get_shape());
+    embeddings.copy_to(input);
+    const auto shape = tokens.get_shape();
+    const auto hidden = input.get_shape().back();
+    if (m_past == 0) {
+        size_t inserted = 0;
+        for (size_t i = 0; i < tokens.get_size(); ++i) {
+            if (tokens.data<const int64_t>()[i] != m_audio_token_id)
+                continue;
+            OPENVINO_ASSERT(inserted < audio.get_shape()[1], "ASR prompt has more audio placeholders than features");
+            std::copy_n(audio.data<const float>() + inserted++ * hidden, hidden, input.data<float>() + i * hidden);
+        }
+        OPENVINO_ASSERT(inserted == audio.get_shape()[1], "ASR prompt audio length does not match encoder output");
+    }
+    ov::Tensor mask(ov::element::i64, {shape[0], m_past + shape[1]});
+    std::fill_n(mask.data<int64_t>(), mask.get_size(), 1);
+    ov::Tensor positions(ov::element::i64, {3, shape[0], shape[1]});
+    for (size_t row = 0; row < 3 * shape[0]; ++row)
+        std::iota(positions.data<int64_t>() + row * shape[1], positions.data<int64_t>() + (row + 1) * shape[1], m_past);
+    m_request.set_tensor("inputs_embeds", input);
+    m_request.set_tensor("attention_mask", mask);
+    m_request.set_tensor("position_ids", positions);
+    m_past += shape[1];
+}
+
 EncodedResults Qwen3ASRDecoder::generate(const ov::Tensor& input_ids,
                                          const ov::Tensor& encoder_hidden_states,
                                          const ASRGenerationConfig& config,
@@ -39,6 +79,7 @@ EncodedResults Qwen3ASRDecoder::generate(const ov::Tensor& input_ids,
 
     // Reset decoder state for fresh generation
     m_request.reset_state();
+    m_past = 0;
 
     std::vector<SequenceGroup::Ptr> sequence_groups;
     sequence_groups.reserve(batch_size);
@@ -75,14 +116,18 @@ EncodedResults Qwen3ASRDecoder::generate(const ov::Tensor& input_ids,
     };
 
     ov::Tensor current_encoder_hidden_states = encoder_hidden_states;
-    m_request.set_tensor("encoder_hidden_states", current_encoder_hidden_states);
+    if (m_embeddings)
+        prepare_gguf_inputs(input_ids, current_encoder_hidden_states);
+    else
+        m_request.set_tensor("encoder_hidden_states", current_encoder_hidden_states);
 
     ov::Tensor beam_idx = ov::Tensor(ov::element::i32, {batch_size});
     std::fill_n(beam_idx.data<int32_t>(), batch_size, 0);
     m_request.set_tensor("beam_idx", beam_idx);
 
     // Prefill: run decoder with full prompt
-    m_request.set_tensor("input_ids", input_ids);
+    if (!m_embeddings)
+        m_request.set_tensor("input_ids", input_ids);
     const auto infer_start = std::chrono::steady_clock::now();
     m_request.infer();
     const auto infer_end = std::chrono::steady_clock::now();
@@ -174,7 +219,10 @@ EncodedResults Qwen3ASRDecoder::generate(const ov::Tensor& input_ids,
                           beam_offsets[active_sequence_groups[i - 1]->get_request_id()]);
         }
 
-        m_request.set_tensor("input_ids", new_input_ids);
+        if (m_embeddings)
+            prepare_gguf_inputs(new_input_ids, current_encoder_hidden_states);
+        else
+            m_request.set_tensor("input_ids", new_input_ids);
         m_request.set_tensor("beam_idx", ov::Tensor{ov::element::i32, {total_num_tokens}, next_beams.data()});
         // for beam search investigate encoder batches reordering based on next_beams
         const auto infer_start = std::chrono::steady_clock::now();

@@ -14,6 +14,9 @@
 #include "speech_generation/qwen3_tts/qwen3_tts_model.hpp"
 #include "speecht5_tts_model.hpp"
 #include "utils.hpp"
+#ifdef ENABLE_GGUF
+#    include "gguf_utils/gguf_utils.hpp"
+#endif
 
 namespace {
 
@@ -40,8 +43,7 @@ enum class SpeechBackend {
     Qwen3TTS,
 };
 
-SpeechBackend resolve_backend(const std::filesystem::path& root_dir,
-                             const std::string& class_name) {
+SpeechBackend resolve_backend(const std::filesystem::path& root_dir, const std::string& class_name) {
     if (class_name == "SpeechT5ForTextToSpeech") {
         return SpeechBackend::SpeechT5;
     }
@@ -69,7 +71,8 @@ SpeechBackend resolve_backend(const std::filesystem::path& root_dir,
         return SpeechBackend::Kokoro;
     }
 
-    OPENVINO_THROW("Unsupported text to speech generation pipeline '", class_name,
+    OPENVINO_THROW("Unsupported text to speech generation pipeline '",
+                   class_name,
                    "'. Unable to auto-detect a supported backend from model metadata/files. "
                    "Expected SpeechT5 architecture metadata or Kokoro-specific model layout");
 }
@@ -83,6 +86,13 @@ Text2SpeechPipeline::Text2SpeechPipeline(const std::filesystem::path& root_dir,
                                          const std::string& device,
                                          const ov::AnyMap& properties)
     : m_speech_gen_config(utils::from_config_json_if_exists<SpeechGenerationConfig>(root_dir)) {
+#ifdef ENABLE_GGUF
+    if (root_dir.extension() == ".gguf") {
+        m_impl = std::make_shared<Qwen3TTSImpl>(root_dir, device, properties);
+        m_speech_gen_config.subtalker_temperature = 1.f;
+        return;
+    }
+#endif
     const std::string class_name = get_class_name(root_dir);
 
     const auto backend = resolve_backend(root_dir, class_name);
@@ -102,6 +112,16 @@ Text2SpeechDecodedResults Text2SpeechPipeline::generate(const std::vector<std::s
                                                         const ov::AnyMap& properties) {
     SpeechGenerationConfig request_config = m_speech_gen_config;
     request_config.update_generation_config(properties);
+    request_config.validate();
+    return m_impl->generate(texts, speaker_embedding, request_config);
+}
+
+Text2SpeechDecodedResults Text2SpeechPipeline::generate_with_config(
+    const std::vector<std::string>& texts,
+    const ov::Tensor& speaker_embedding,
+    const std::optional<SpeechGenerationConfig>& generation_config) {
+    const SpeechGenerationConfig request_config =
+        generation_config.has_value() ? *generation_config : m_speech_gen_config;
     request_config.validate();
     return m_impl->generate(texts, speaker_embedding, request_config);
 }

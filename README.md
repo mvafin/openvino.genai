@@ -104,3 +104,55 @@ Continuous batching functionality is used within OpenVINO Model Server (OVMS) to
 The OpenVINO™ GenAI repository is licensed under [Apache License Version 2.0](LICENSE).
 By contributing to the project, you agree to the license and copyright terms therein and release
 your contribution under these terms.
+
+### Additional GGUF families on the mmproj branch
+
+The companion [OpenVINO frontend PR](https://github.com/openvinotoolkit/openvino/pull/39000)
+enables Cohere2, dense Qwen3VL with DeepStack, Gemma3n vision, EAGLE3 and Qwen-backed
+DFlash. Paired GenAI support also covers AFMoE, Qwen3VL MoE/Omni, Qwen3-ASR, Qwen3TTS
+and MiniCPM-V 4.7. Use `GGUF_READER="FRONTEND"` and `mmproj_path` for supported
+multimodal files. See the frontend's [supported-model](https://github.com/openvinotoolkit/openvino/blob/mvafin/gguf/2026-model-families/src/frontends/gguf/docs/supported_models.md#quantized-support-and-model-quality)
+and [projector](https://github.com/openvinotoolkit/openvino/blob/mvafin/gguf/2026-model-families/src/frontends/gguf/docs/mmproj.md#projector-reference-accuracy-and-runtime-limits)
+documentation for checkpoint evidence and limitations.
+
+Gemma3n inserts the actual GGUF `<pad>` image placeholder, including per-layer embedding
+spans. The original E2B Q4_0 decoder matches 13/13 reference-token predictions, and its
+original combined projector passes full vision-feature NMSE `6.10e-7` against `1e-5`.
+The frontend omits unsupported `gemma3na` audio and records `audio.supported=false`.
+Repeated 64-token PA image generation correctly identifies the cat and cardboard box.
+Original Cohere2 Q4_0 matches 13/13 predictions and gives identical repeated SDPA/PA text
+outputs. Dense Qwen3VL Q4_0 passes repeated image generation with both backends.
+
+`draft_model()` accepts GGUF paths and clones omitted embedding/head weights from the
+target before compilation. CPU EAGLE3/DFlash use continuous batching. EAGLE3's real
+Qwen3-8B pair passes repeated two-request generation and target-only greedy agreement.
+DFlash accepts one active request, greedy decoding and disabled prefix caching; its
+Qwen3.6-35B-A3B pair passes repeated PA generation. DeepSeek-V4 and multiple active
+DFlash requests are deferred.
+
+AFMoE (Trinity-Nano-Preview Q4_K_S) and Qwen3-Omni-30B-A3B-Instruct Q4_K_M have
+quantized text-decoder support on CPU with GenAI PagedAttention. A 20-prompt WWB comparison
+(greedy, at most 128 generated tokens, F16 KV, and `OV_GGUF_Q4_K_ZP_F16=1`) used the same
+quantized GGUF in both backends and pinned llama.cpp reference answers generated from
+original publisher BF16 GGUFs converted to F16. Mean semantic-similarity scores were:
+
+| Quantized checkpoint | llama.cpp | GenAI, reference IDs | GenAI, default string input |
+|---|---:|---:|---:|
+| Trinity-Nano-Preview Q4_K_S (AFMoE) | 0.9174 | 0.9272 | 0.9275 |
+| Qwen3-Omni-30B-A3B-Instruct Q4_K_M | 0.9844 | 0.9832 | 0.9832 |
+
+These scores measure agreement with reference answers, not correctness or percent
+accuracy. Matched-input GenAI minus llama.cpp is +0.0098 for AFMoE and −0.0011 for Omni,
+with no material additional GenAI quality loss in this sample. AFMoE's GenAI tokenizer segments ` $` and `-sentence` differently on two prompts;
+the default-input score regenerated those prompts with string input and reused 18 verified
+rows. Omni's GenAI default stop set omits llama.cpp's `<|fim_pad|>`, `<|repo_name|>` and
+`<|file_sep|>` markers; all 20 prompt tokenizations match and none of the omitted markers
+was sampled. These tokenizer and EOG differences remain tracked separately.
+
+The WWB comparison covers text only. Omni image and audio-input cases have separate CPU PA
+coverage with a constrained scheduler; speech output, video and longer media remain
+unassessed. Qwen3TTS's F32 path returns repeated finite audio, while speech quality, voice
+cloning and longer generation remain unassessed and its public API has no cancellation.
+Qwen3Next has no completed full-model/API result because of RAM limits. DeepSeek-V4 and
+multiple active DFlash requests remain deferred. Numerical token-replay and projector
+parity diagnostics are documented separately in the frontend references above.

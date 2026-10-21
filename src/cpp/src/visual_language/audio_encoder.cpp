@@ -9,6 +9,7 @@
 
 #include "openvino/opsets/opset15.hpp"
 #include "utils.hpp"
+#include "whisper/feature_extractor.hpp"
 
 namespace ov::genai {
 namespace {
@@ -202,6 +203,46 @@ private:
     size_t m_bins, m_position_width;
 };
 
+class Qwen3AudioEncoder : public AudioEncoderBase {
+public:
+    Qwen3AudioEncoder(const std::shared_ptr<ov::Model>& model,
+                      size_t mel_bins,
+                      const std::string& device,
+                      const ov::AnyMap& properties)
+        : AudioEncoderBase(model, device, properties),
+          m_features(mel_bins, 16000, 400, 160) {}
+
+    size_t min_samples() const override {
+        return 201;
+    }
+
+    std::vector<ov::Tensor> encode_waveform(const float* samples, size_t count) override {
+        auto features = m_features.extract(std::vector<float>(samples, samples + count), false);
+        OPENVINO_ASSERT(features.n_frames > 0, "Qwen3 audio must produce at least one mel frame");
+        const auto chunks = (features.n_frames + 99) / 100;
+        const auto padded = chunks * 100;
+        ov::Tensor input(ov::element::f32, {1, features.feature_size, 1, padded});
+        std::fill_n(input.data<float>(), input.get_size(), 0.f);
+        for (size_t band = 0; band < features.feature_size; ++band)
+            std::copy_n(features.data.data() + band * features.n_frames,
+                        features.n_frames,
+                        input.data<float>() + band * padded);
+        m_encoder.set_tensor("features", input);
+        auto output = infer();
+        const auto hidden = output.get_shape().back();
+        const auto tail = features.n_frames - (chunks - 1) * 100;
+        const auto tail_tokens = (tail + 7) / 8;
+        const auto tokens = (chunks - 1) * 13 + tail_tokens;
+        OPENVINO_ASSERT(output.get_size() == chunks * 13 * hidden, "Unexpected Qwen3 audio encoder geometry");
+        ov::Tensor valid(ov::element::f32, {1, tokens, hidden});
+        std::copy_n(output.data<const float>(), valid.get_size(), valid.data<float>());
+        return {std::move(valid)};
+    }
+
+private:
+    WhisperFeatureExtractor m_features;
+};
+
 class Gemma4AudioEncoder : public AudioEncoderBase {
 public:
     Gemma4AudioEncoder(const std::shared_ptr<ov::Model>& model,
@@ -264,6 +305,9 @@ AudioEncode create_audio_encoder(const std::shared_ptr<ov::Model>& model,
     switch (config.type) {
     case AudioEncoderType::LFM2:
         encoder = std::make_shared<LFM2AudioEncoder>(model, config.num_mel_bins, device, properties);
+        break;
+    case AudioEncoderType::QWEN3:
+        encoder = std::make_shared<Qwen3AudioEncoder>(model, config.num_mel_bins, device, properties);
         break;
     case AudioEncoderType::GEMMA4:
     case AudioEncoderType::GEMMA4_UNIFIED:

@@ -21,6 +21,13 @@ namespace ov::genai {
 class Qwen3ASR : public ASRPipelineImplBase {
 public:
     Qwen3ASR(const std::filesystem::path& models_path, const std::string& device, const ov::AnyMap& properties);
+    Qwen3ASR(const Tokenizer& tokenizer,
+             const std::shared_ptr<ov::Model>& encoder,
+             const std::shared_ptr<ov::Model>& decoder,
+             const std::shared_ptr<ov::Model>& embeddings,
+             size_t mel_bins,
+             const std::string& device,
+             const ov::AnyMap& properties);
 
     ASRDecodedResults generate(const AudioInputs& audio_inputs,
                                const std::optional<ASRGenerationConfig>& generation_config,
