@@ -154,11 +154,6 @@ BACKEND_LIMITATIONS = [
         RuntimeError,
         "Soft-capped Gemma2 attention has no SDPA node for explicit PA conversion",
     ),
-    (
-        lambda arch, variant, backend: arch == "gpt-oss",
-        AssertionError,
-        "Generated GPT-OSS F32 logits diverge from llama.cpp CPU before decoding",
-    ),
 ]
 
 
