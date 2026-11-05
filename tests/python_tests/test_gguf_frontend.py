@@ -580,6 +580,13 @@ def test_gguf_vlm_attention_backends_and_images(gguf_vlm_pipelines):
         ]
 
 
+def built_extension_path(name="openvino_custom_add_extension"):
+    try:
+        return get_extension_lib_path(name)
+    except FileNotFoundError as error:
+        pytest.skip(f"GenAI test extensions are not built: {error}")
+
+
 @pytest.mark.parametrize(
     "pipeline_class,with_tokenizer",
     [
@@ -596,7 +603,7 @@ def test_gguf_frontend_extensions(tiny_gguf_vlm_model, pipeline_class, with_toke
     if pipeline_class == genai.ContinuousBatchingPipeline:
         args.append(genai.SchedulerConfig())
     args.append("CPU")
-    properties = {"GGUF_READER": "FRONTEND", "extensions": [get_extension_lib_path()]}
+    properties = {"GGUF_READER": "FRONTEND", "extensions": [built_extension_path()]}
     if pipeline_class == genai.VLMPipeline:
         properties["mmproj_path"] = str(projector)
     with pytest.raises(RuntimeError, match="GGUF frontend extension was invoked"):
@@ -613,7 +620,7 @@ def test_gguf_projector_frontend_extensions(tiny_gguf_vlm_model):
             language,
             "CPU",
             mmproj_path=str(projector),
-            extensions=[get_extension_lib_path("openvino_gguf_projector_test_extension")],
+            extensions=[built_extension_path("openvino_gguf_projector_test_extension")],
         )
 
 
