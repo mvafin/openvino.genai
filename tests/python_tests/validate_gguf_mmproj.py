@@ -65,7 +65,7 @@ def main():
     parser.add_argument("--audio", type=Path, help="Also compare audio and mixed image/audio requests (16 kHz mono WAV)")
     parser.add_argument("--api-checks", action="store_true", help="Check beam search, modern chat, streaming cancellation and reset")
     parser.add_argument("--multi-media", action="store_true", help="Compare two images and, when available, two audio inputs")
-    parser.add_argument("--audio-boundaries", action="store_true", help="Compare audio immediately before and after the 30-second chunk boundary")
+    parser.add_argument("--audio-boundaries", action="store_true", help="Compare audio at the 30-second input limit and check that longer audio is rejected")
     parser.add_argument("--chat", action="store_true", help="Also compare a cached image chat follow-up")
     parser.add_argument("--family", choices=("gemma3", "gemma4", "qwen35", "muse"), default="gemma3")
     parser.add_argument("--attention-backend", choices=("SDPA", "PA"), default="SDPA")
@@ -148,7 +148,7 @@ def validate_coverage(args, report):
         if args.multi_media:
             expected.add("multi_audio")
         if args.audio_boundaries:
-            expected.update(("audio_samples_479999", "audio_samples_480321"))
+            expected.update(("audio_samples_479999", "audio_samples_480000"))
         if args.chat:
             expected.add("audio_chat")
     if args.api_checks:
@@ -307,8 +307,15 @@ def run(args, report):
             if args.multi_media:
                 extra_audios.append(("multi_audio", [waveform, np.ascontiguousarray(waveform[::-1])]))
             if args.audio_boundaries:
-                for length in (30 * 16000 - 1, 30 * 16000 + 321):
+                for length in (30 * 16000 - 1, 30 * 16000):
                     extra_audios.append((f"audio_samples_{length}", [np.resize(waveform, length)]))
+                try:
+                    generate("<|audio|>\nTranscribe the audio.", audios=[ov.Tensor(np.resize(waveform, 30 * 16000 + 1))])
+                except RuntimeError as error:
+                    if "30 second limit" not in str(error):
+                        raise
+                else:
+                    raise AssertionError("Gemma4 accepted audio longer than the 30-second input limit")
             for name, samples in extra_audios:
                 prompt = "<|audio|>\n" * len(samples) + "Transcribe the audio."
                 files = [audio_file(sample, f"{name}_{i}") for i, sample in enumerate(samples)]

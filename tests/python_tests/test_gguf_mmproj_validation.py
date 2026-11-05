@@ -31,7 +31,7 @@ def test_audio_boundary_and_api_coverage_is_required():
         "mixed",
         "multi_audio",
         "audio_samples_479999",
-        "audio_samples_480321",
+        "audio_samples_480000",
         "image_chat",
         "audio_chat",
         "modern_image",
