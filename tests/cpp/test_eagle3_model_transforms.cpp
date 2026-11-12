@@ -139,20 +139,38 @@ TEST(Eagle3ModelTransforms, AttachesBorrowedGgufWeightsAndPreservesOwnWeights) {
         EXPECT_FLOAT_EQ(logits.data<const float>()[i], .25f);
 }
 
-TEST(Eagle3ModelTransforms, UsesIdentityMappingOnlyForGgufWithoutReducedVocabulary) {
+TEST(Eagle3ModelTransforms, ConvertsGgufTargetIdsToSamplerOffsets) {
     namespace eagle = ov::genai::utils::eagle3;
     auto logits = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{1, -1, 8});
     logits->output(0).set_names({"logits"});
     auto model = std::make_shared<ov::Model>(ov::OutputVector{logits}, ov::ParameterVector{logits});
     EXPECT_EQ(eagle::extract_d2t_mapping_table(model), nullptr);
+    auto native = ov::op::v0::Constant::create(ov::element::i64, {2}, {3, 5});
+    native->set_friendly_name("d2t");
+    model->add_results({std::make_shared<ov::op::v0::Result>(native)});
+    EXPECT_EQ(eagle::extract_d2t_mapping_table(model), native);
     model->set_rt_info(std::string("eagle3"), "gguf_architecture");
     const auto identity = eagle::extract_d2t_mapping_table(model);
     ASSERT_NE(identity, nullptr);
-    EXPECT_EQ(identity->cast_vector<int64_t>(), (std::vector<int64_t>{0, 1, 2, 3, 4, 5, 6, 7}));
+    EXPECT_EQ(identity->cast_vector<int64_t>(), (std::vector<int64_t>{0, 0, 0, 0, 0, 0, 0, 0}));
     EXPECT_EQ(model->get_results().size(), 1u);
+    logits->set_partial_shape(ov::PartialShape{1, -1, 4});
+    model->validate_nodes_and_infer_types();
     auto reduced = ov::op::v0::Constant::create(ov::element::i64, {4}, {1, 3, 5, 7});
     reduced->set_friendly_name("d2t");
     model->add_results({std::make_shared<ov::op::v0::Result>(reduced)});
-    EXPECT_EQ(eagle::extract_d2t_mapping_table(model), reduced);
+    const auto offsets = eagle::extract_d2t_mapping_table(model);
+    ASSERT_NE(offsets, nullptr);
+    EXPECT_EQ(offsets->cast_vector<int64_t>(), (std::vector<int64_t>{1, 2, 3, 4}));
     EXPECT_EQ(model->get_results().size(), 1u);
+    auto invalid = ov::op::v0::Constant::create(ov::element::i64, {2}, {0, 1});
+    invalid->set_friendly_name("d2t");
+    auto invalid_result = std::make_shared<ov::op::v0::Result>(invalid);
+    model->add_results({invalid_result});
+    EXPECT_THROW(eagle::extract_d2t_mapping_table(model), ov::Exception);
+    model->remove_result(invalid_result);
+    invalid = ov::op::v0::Constant::create(ov::element::i64, {4}, {0, 1, -1, 3});
+    invalid->set_friendly_name("d2t");
+    model->add_results({std::make_shared<ov::op::v0::Result>(invalid)});
+    EXPECT_THROW(eagle::extract_d2t_mapping_table(model), ov::Exception);
 }

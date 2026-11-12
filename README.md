@@ -126,8 +126,11 @@ outputs. Dense Qwen3VL Q4_0 passes repeated image generation with both backends.
 `draft_model()` accepts GGUF paths and clones omitted embedding/head weights from the
 target before compilation. CPU EAGLE3/DFlash use continuous batching. EAGLE3's real
 Qwen3-8B pair passes repeated two-request generation and target-only greedy agreement.
+In each tested repetition it accepts 23 of 68 proposed draft tokens. GGUF `d2t` contains
+absolute token IDs, which GenAI converts to the sampler's offsets.
 DFlash accepts one active request, greedy decoding and disabled prefix caching; its
-Qwen3.6-35B-A3B pair passes repeated PA generation. DeepSeek-V4 and multiple active
+Qwen3.6-35B-A3B pair passes repeated PA generation with 4 of 65 drafts accepted per
+repetition. DeepSeek-V4 and multiple active
 DFlash requests are deferred.
 
 AFMoE (Trinity-Nano-Preview Q4_K_S) and Qwen3-Omni-30B-A3B-Instruct Q4_K_M have

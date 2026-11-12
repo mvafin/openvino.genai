@@ -5,7 +5,6 @@
 
 #include <fstream>
 #include <nlohmann/json.hpp>
-#include <numeric>
 #include <string>
 
 #include "json_utils.hpp"
@@ -306,10 +305,26 @@ static std::shared_ptr<ov::op::v0::Result> find_d2t_result_node(const std::share
 }
 
 std::shared_ptr<ov::op::v0::Constant> extract_d2t_mapping_table(const std::shared_ptr<ov::Model>& model) {
-    // extract result nodes from model
     auto d2t_result = find_d2t_result_node(model);
     if (d2t_result) {
         auto constant = ov::as_type_ptr<ov::op::v0::Constant>(d2t_result->input_value(0).get_node_shared_ptr());
+        if (model->has_rt_info("gguf_architecture")) {
+            const auto shape = model->output("logits").get_partial_shape();
+            OPENVINO_ASSERT(constant->get_element_type() == ov::element::i64 && constant->get_shape().size() == 1,
+                            "GGUF d2t mapping must be a rank-one i64 tensor");
+            OPENVINO_ASSERT(
+                shape.rank().is_static() && shape.rank().get_length() > 0 &&
+                    shape[shape.rank().get_length() - 1].is_static() &&
+                    static_cast<size_t>(shape[shape.rank().get_length() - 1].get_length()) == constant->get_shape()[0],
+                "GGUF d2t mapping must match the draft vocabulary");
+            // GGUF stores target IDs; the sampler expects offsets from draft IDs.
+            auto offsets = constant->cast_vector<int64_t>();
+            for (size_t i = 0; i < offsets.size(); ++i) {
+                OPENVINO_ASSERT(offsets[i] >= 0, "GGUF d2t mapping contains a negative target token ID");
+                offsets[i] -= static_cast<int64_t>(i);
+            }
+            constant = ov::op::v0::Constant::create(ov::element::i64, constant->get_shape(), offsets);
+        }
         model->remove_result(d2t_result);
         model->validate_nodes_and_infer_types();
         return constant;
@@ -319,8 +334,7 @@ std::shared_ptr<ov::op::v0::Constant> extract_d2t_mapping_table(const std::share
         OPENVINO_ASSERT(shape.rank().is_static() && shape.rank().get_length() > 0 &&
                             shape[shape.rank().get_length() - 1].is_static(),
                         "GGUF draft vocabulary must be resolved before extracting the token mapping");
-        std::vector<int64_t> mapping(shape[shape.rank().get_length() - 1].get_length());
-        std::iota(mapping.begin(), mapping.end(), int64_t{0});
+        std::vector<int64_t> mapping(shape[shape.rank().get_length() - 1].get_length(), 0);
         return ov::op::v0::Constant::create(ov::element::i64, {mapping.size()}, mapping);
     }
     return nullptr;

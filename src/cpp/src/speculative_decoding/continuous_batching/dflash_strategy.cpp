@@ -686,6 +686,8 @@ void ContinuousBatchingPipeline::DFlashDecodingImpl::step() {
         }
         const float acceptance_rate =
             draft_generated > 0 ? static_cast<float>(accounting.accepted) / draft_generated * 100.0f : 0.0f;
+        m_perf_metrics.num_draft_tokens += draft_generated;
+        m_perf_metrics.num_accepted_tokens += accounting.accepted;
         m_sd_metrics.update_draft_generated_len(request_id, draft_generated);
         m_sd_metrics.update_draft_accepted_tokens(request_id, accounting.accepted);
         m_sd_metrics.update_acceptance_rate(request_id, acceptance_rate);
