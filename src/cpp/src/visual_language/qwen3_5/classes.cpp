@@ -10,7 +10,9 @@ InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(const VLMModels& models,
                                              const Tokenizer& tokenizer,
                                              const std::string& device,
                                              const ov::AnyMap& properties)
-    : InputsEmbedderQwen3VL(models, tokenizer, device, properties) {}
+    : InputsEmbedderQwen3VL(models, tokenizer, device, properties) {
+    patch_chat_template();
+}
 
 InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(
     const VLMConfig& vlm_config,
@@ -18,7 +20,9 @@ InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(
     const Tokenizer& tokenizer,
     const std::string& device,
     const ov::AnyMap device_config
-) : InputsEmbedderQwen3VL(vlm_config, model_dir, tokenizer, device, device_config) {}
+) : InputsEmbedderQwen3VL(vlm_config, model_dir, tokenizer, device, device_config) {
+    patch_chat_template();
+}
 
 InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(
     const VLMConfig& vlm_config,
@@ -27,7 +31,13 @@ InputsEmbedderQwen3_5::InputsEmbedderQwen3_5(
     const std::filesystem::path& config_dir_path,
     const std::string& device,
     const ov::AnyMap device_config
-) : InputsEmbedderQwen3VL(vlm_config, models_map, tokenizer, config_dir_path, device, device_config) {}
+) : InputsEmbedderQwen3VL(vlm_config, models_map, tokenizer, config_dir_path, device, device_config) {
+    patch_chat_template();
+}
+
+void InputsEmbedderQwen3_5::patch_chat_template() {
+    set_chat_template_patcher(m_tokenizer, utils::patch_chat_template_undefined_tests);
+}
 
 std::pair<ov::Tensor, int64_t> InputsEmbedderQwen3_5::create_position_ids(
     const ov::Tensor& input_ids_tensor,

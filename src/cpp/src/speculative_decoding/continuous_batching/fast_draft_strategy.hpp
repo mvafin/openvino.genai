@@ -17,9 +17,7 @@ struct GenerateStrategy {
     std::function<void(size_t,
                        const ov::Tensor& in_ids,
                        GenerationConfig& main_cfg,
-                       GenerationConfig& draft_cfg,
-                       ov::Tensor& main_in,
-                       ov::Tensor& draft_in)> prepare_request;
+                       ov::Tensor& main_in)> prepare_request;
     std::function<void(const std::shared_ptr<ThreadedStreamerWrapper>&,
                        const std::vector<ov::Tensor>&,
                        const std::vector<GenerationConfig>&)> check_streaming;
@@ -50,7 +48,9 @@ std::vector<EncodedGenerationResult> generate_common(
                         "LoRA adapters must be same for all requests");
     }
     self->main_pipeline()->set_adapters(sampling_params[0].adapters);
-    self->draft_pipeline()->set_adapters(sampling_params[0].adapters);
+    if (self->draft_pipeline()) {
+        self->draft_pipeline()->set_adapters(sampling_params[0].adapters);
+    }
 
     auto streamer_ptr = std::make_shared<ThreadedStreamerWrapper>(streamer, self->tokenizer());
 
@@ -67,11 +67,8 @@ std::vector<EncodedGenerationResult> generate_common(
     std::vector<GenerationHandle> main_generations;
     for (size_t rid = 0; rid < input_ids.size(); ++rid) {
         GenerationConfig main_cfg = sampling_params[rid];
-        GenerationConfig draft_cfg = main_cfg;
-        ov::Tensor main_in, draft_in;
-        strategy.prepare_request(rid, input_ids[rid],
-                                main_cfg, draft_cfg,
-                                main_in, draft_in);
+        ov::Tensor main_in;
+        strategy.prepare_request(rid, input_ids[rid], main_cfg, main_in);
 
         const bool has_valid_prompt_ids = prompt_ids.has_value() && rid < prompt_ids->size();
 
@@ -115,7 +112,9 @@ std::vector<EncodedGenerationResult> generate_common(
 
     OPENVINO_ASSERT(self->is_requests_empty(), "Internal error: current request is supposed to be dropped within step() function as completed");
 
-    self->perf_metrics().draft_model_metrics.raw_metrics = self->draft_pipeline()->raw_perf_metrics;
+    if (self->draft_pipeline()) {
+        self->perf_metrics().draft_model_metrics.raw_metrics = self->draft_pipeline()->raw_perf_metrics;
+    }
     uint64_t generate_duration_us = strategy.stop_timer(t_start);
 
     std::vector<EncodedGenerationResult> results;
@@ -180,12 +179,14 @@ protected:
 
     void reset_generate_metrics() {
         m_perf_metrics = ov::genai::SDPerModelsPerfMetrics();
-        m_draft_pipeline->raw_perf_metrics = RawPerfMetrics{};
-        m_draft_pipeline->raw_perf_metrics.m_inference_durations = {{ MicroSeconds(0.0f) }};
+        if (m_draft_pipeline) {
+            m_draft_pipeline->raw_perf_metrics = RawPerfMetrics{};
+            m_draft_pipeline->raw_perf_metrics.m_inference_durations = {{ MicroSeconds(0.0f) }};
+        }
     }
 
     static int64_t compute_rope_delta(const ov::Tensor& position_ids);
-    void drop_requests();
+    virtual void drop_requests();
     virtual void align_request_pair_processed_prefix(uint64_t) {}
     virtual void validate_awaiting_requests(const std::vector<SequenceGroup::Ptr>& main_awaiting_requests,
                                             const std::vector<SequenceGroup::Ptr>& draft_awaiting_requests) const {

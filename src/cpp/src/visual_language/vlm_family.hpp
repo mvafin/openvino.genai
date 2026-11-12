@@ -3,17 +3,22 @@
 
 #pragma once
 
+#include "automatic_speech_recognition/models/qwen3-asr/split/inputs_embedder.hpp"
 #include "visual_language/deepseek_ocr2/classes.hpp"
 #include "visual_language/gemma3/classes.hpp"
 #include "visual_language/gemma3n/classes.hpp"
 #include "visual_language/gemma4/classes.hpp"
 #include "visual_language/internvl_chat/classes.hpp"
 #include "visual_language/lfm2/classes.hpp"
+#include "visual_language/lfm3_vl/classes.hpp"
 #include "visual_language/llava/classes.hpp"
 #include "visual_language/llava_next/classes.hpp"
 #include "visual_language/llava_next_video/classes.hpp"
 #include "visual_language/minicpm/classes.hpp"
+#include "visual_language/minicpmv4_6/classes.hpp"
 #include "visual_language/minicpmv4_7/classes.hpp"
+#include "visual_language/mistral3/classes.hpp"
+#include "visual_language/molmo2/classes.hpp"
 #include "visual_language/muse_glimmer/classes.hpp"
 #include "visual_language/nanollava/classes.hpp"
 #include "visual_language/phi3_vision/classes.hpp"
@@ -23,6 +28,7 @@
 #include "visual_language/qwen3_5/classes.hpp"
 #include "visual_language/qwen3_omni/classes.hpp"
 #include "visual_language/qwen3_vl/classes.hpp"
+#include "visual_language/qwen4_exp/classes.hpp"
 #include "visual_language/videochat_flash/classes.hpp"
 #include "visual_language/vlm_config.hpp"
 
@@ -44,8 +50,13 @@ decltype(auto) visit_vlm_family(VLMModelType type, Visitor&& visit) {
     switch (type) {
     case VLMModelType::LFM2_AUDIO:
         return visit(VLMFamily<NoVisionEncoder, InputsEmbedderLFM2Audio>{});
+    case VLMModelType::QWEN3_ASR:
+        return visit(VLMFamily<NoVisionEncoder, InputsEmbedderQwen3ASR>{});
     case VLMModelType::MINICPM:
         return visit(VLMFamily<VisionEncoderMiniCPM, InputsEmbedderMiniCPM>{});
+    case VLMModelType::MINICPMV4_6:
+    case VLMModelType::MINICPM_OCR:
+        return visit(VLMFamily<VisionEncoderMiniCPMV4_6, InputsEmbedderMiniCPMV4_6>{});
     case VLMModelType::MINICPMV4_7:
         return visit(VLMFamily<VisionEncoderMiniCPMv4_7, InputsEmbedderMiniCPMv4_7>{});
     case VLMModelType::LLAVA:
@@ -68,6 +79,8 @@ decltype(auto) visit_vlm_family(VLMModelType type, Visitor&& visit) {
         return visit(VLMFamily<VisionEncoderQwen2_5_VL, InputsEmbedderQwen2_5_VL>{});
     case VLMModelType::QWEN3_VL:
         return visit(VLMFamily<VisionEncoderQwen3VL, InputsEmbedderQwen3VL>{});
+    case VLMModelType::QWEN4_EXP:
+        return visit(VLMFamily<VisionEncoderQwen4_Exp, InputsEmbedderQwen4_Exp>{});
     case VLMModelType::QWEN3_5:
     case VLMModelType::QWEN3_5_MOE:
         return visit(VLMFamily<VisionEncoderQwen3_5, InputsEmbedderQwen3_5>{});
@@ -79,6 +92,8 @@ decltype(auto) visit_vlm_family(VLMModelType type, Visitor&& visit) {
         return visit(VLMFamily<VisionEncoderGemma3n, InputsEmbedderGemma3n>{});
     case VLMModelType::LFM2_VL:
         return visit(VLMFamily<VisionEncoderLFM2, InputsEmbedderLFM2Vision>{});
+    case VLMModelType::LFM3_VL:
+        return visit(VLMFamily<VisionEncoderLFM3VL, InputsEmbedderLFM3VL>{});
     case VLMModelType::GEMMA4:
     case VLMModelType::GEMMA4_UNIFIED:
         return visit(VLMFamily<VisionEncoderGemma4, InputsEmbedderGemma4>{});
@@ -88,6 +103,10 @@ decltype(auto) visit_vlm_family(VLMModelType type, Visitor&& visit) {
         return visit(VLMFamily<VisionEncoderDeepseekOCR2, InputsEmbedderDeepseekOCR2>{});
     case VLMModelType::MUSE_GLIMMER:
         return visit(VLMFamily<VisionEncoderMuseGlimmer, InputsEmbedderMuseGlimmer>{});
+    case VLMModelType::MISTRAL3:
+        return visit(VLMFamily<VisionEncoderMistral3, InputsEmbedderMistral3>{});
+    case VLMModelType::MOLMO2:
+        return visit(VLMFamily<VisionEncoderMolmo2, InputsEmbedderMolmo2>{});
     default:
         OPENVINO_THROW("Unsupported model type in VLM pipeline. Please, create feature request on new model support");
     }

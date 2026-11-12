@@ -9,6 +9,7 @@
 #include "gguf_utils/gguf_lfm2_audio.hpp"
 #include "gguf_utils/gguf_multimodal.hpp"
 #include "gtest/gtest.h"
+#include "openvino/genai/automatic_speech_recognition/pipeline.hpp"
 #include "openvino/genai/gguf.hpp"
 #include "openvino/genai/tokenizer.hpp"
 #include "openvino/op/constant.hpp"
@@ -158,6 +159,26 @@ std::vector<ov::Tensor> first_sample_audio_features(const ov::Tensor& audio) {
     std::fill_n(features.data<float>(), features.get_size(), audio.data<const float>()[0]);
     return {features};
 }
+
+constexpr char qwen35_chat_template[] =
+    "{%- if enable_thinking is undefined or enable_thinking is true %}think{%- else %}direct{%- endif %}"
+    ":{{ messages[0]['content'] }}";
+
+ov::genai::GGUFTokenizerParameters byte_level_bpe_config(const std::string& pre) {
+    std::vector<std::string> vocab{"<|endoftext|>", "a", "b"};
+    std::vector<int32_t> types{3, 1, 1};
+    ov::Tensor type_tensor(ov::element::i32, {types.size()});
+    std::memcpy(type_tensor.data(), types.data(), type_tensor.get_byte_size());
+    ov::Tensor eos(ov::element::u32, {});
+    eos.data<uint32_t>()[0] = 0;
+    return ov::genai::GGUFTokenizerParameters({{"model", std::string("gpt2")},
+                                               {"pre", pre},
+                                               {"tokens", vocab},
+                                               {"token_type", type_tensor},
+                                               {"merges", std::vector<std::string>{}},
+                                               {"eos_token_id", eos},
+                                               {"chat_template", std::string(qwen35_chat_template)}});
+}
 }  // namespace
 
 TEST(GGUFTokenizer, SentencePieceControlTokensUseTheirVocabularyIds) {
@@ -293,7 +314,7 @@ TEST(GGUFMultimodal, Qwen3SplitConsumersRunTextAndImagesWithoutDeepStack) {
             embedder = std::make_unique<InputsEmbedderQwen3Omni>(models, tokenizer, "CPU", ov::AnyMap{});
         else
             embedder = std::make_unique<InputsEmbedderQwen3VL>(models, tokenizer, "CPU", ov::AnyMap{});
-        embedder->set_apply_chat_template_status(false);
+        embedder->set_prompt_formatting(PromptFormatting::Raw);
         EXPECT_TRUE(embedder->get_lm_extra_inputs().empty());
         VLMPerfMetrics metrics;
         const auto text = embedder->get_inputs_embeds("a", {}, {}, metrics);
@@ -324,14 +345,16 @@ TEST(GGUFMultimodal, Qwen3SplitConsumersRetainConfiguredDeepStackInputs) {
     models.config.vision_config_deepstack_visual_indexes = {0, 1};
     GGUFTokenizer tokenizer(sentencepiece_config());
     InputsEmbedderQwen3VL embedder(models, tokenizer, "CPU", {});
-    embedder.set_apply_chat_template_status(false);
+    embedder.set_prompt_formatting(PromptFormatting::Raw);
     VLMPerfMetrics metrics;
-    embedder.get_inputs_embeds("a", {}, {}, metrics);
+    const auto embeddings = embedder.get_inputs_embeds("a", {}, {}, metrics);
     const auto& extras = embedder.get_lm_extra_inputs();
     EXPECT_EQ(extras.size(), 2);
     EXPECT_EQ(extras.at("deepstack_visual_embeds").get_shape(), (ov::Shape{2, 1, 4}));
-    ASSERT_EQ(extras.at("visual_pos_masks").get_shape(), (ov::Shape{1, 1}));
-    EXPECT_FALSE(extras.at("visual_pos_masks").data<const bool>()[0]);
+    const auto mask = extras.at("visual_pos_masks");
+    ASSERT_EQ(mask.get_shape(), (ov::Shape{1, embeddings.get_shape()[1]}));
+    for (size_t i = 0; i < mask.get_size(); ++i)
+        EXPECT_FALSE(mask.data<const bool>()[i]);
 }
 
 TEST(GGUFMultimodal, OmniSplitPositionsMatchDecoderSectionsInPrefillAndDecode) {
@@ -347,7 +370,7 @@ TEST(GGUFMultimodal, OmniSplitPositionsMatchDecoderSectionsInPrefillAndDecode) {
         auto models = qwen3_split_models(VLMModelType::QWEN3_OMNI);
         models.config.position_ids_sections = sections;
         TestEmbedder embedder(models, tokenizer, "CPU", {});
-        embedder.set_apply_chat_template_status(false);
+        embedder.set_prompt_formatting(PromptFormatting::Raw);
         VLMPerfMetrics metrics;
         embedder.get_inputs_embeds("a", {}, {}, metrics);
         const auto text_positions = embedder.get_position_ids(2, 0).first;
@@ -400,21 +423,34 @@ TEST(GGUFMultimodal, PreformattedChatDoesNotDuplicateSpecialTokens) {
     const std::vector<int64_t> expected{1, 4, 9, 5};
     EXPECT_EQ(encode("a"), expected);
     embedder.finish_chat();
-    embedder.set_apply_chat_template_status(false, true);
+    embedder.set_prompt_formatting(PromptFormatting::AlreadyTemplated);
     EXPECT_EQ(encode(tokenizer.apply_chat_template({{{"role", "user"}, {"content", "a"}}}, true)), expected);
     embedder.finish_chat();
-    embedder.set_apply_chat_template_status(false);
+    embedder.set_prompt_formatting(PromptFormatting::Raw);
     EXPECT_EQ(encode("a"), (std::vector<int64_t>{1, 9}));
     embedder.finish_chat();
-    embedder.set_apply_chat_template_status(true);
+    embedder.set_prompt_formatting(PromptFormatting::NeedsTemplate);
     EXPECT_EQ(encode("a"), expected);
+}
+
+TEST(GGUFASR, RejectsPagedAttentionBeforeReadingTheModel) {
+    try {
+        ov::genai::ASRPipeline pipeline("missing.gguf",
+                                        "CPU",
+                                        {{"mmproj_path", std::string("missing-projector.gguf")},
+                                         {"GGUF_READER", std::string("FRONTEND")},
+                                         {"ATTENTION_BACKEND", std::string("PA")}});
+        FAIL() << "Expected GGUF ASR to reject PagedAttention";
+    } catch (const ov::Exception& error) {
+        EXPECT_NE(std::string(error.what()).find("attention backend is supported only"), std::string::npos);
+    }
 }
 
 TEST(GGUFMultimodal, GemmaAudioPlacementFollowsTheAudioSequence) {
     using namespace ov::genai;
     GGUFTokenizer tokenizer(sentencepiece_config());
     InputsEmbedderGemma4 embedder(gemma4_models(), tokenizer, "CPU", {});
-    embedder.set_apply_chat_template_status(false);
+    embedder.set_prompt_formatting(PromptFormatting::Raw);
     embedder.set_audio_encoder(first_sample_audio_features);
     const auto sample = [](float value) {
         ov::Tensor audio(ov::element::f32, {1});
@@ -476,7 +512,7 @@ TEST(GGUFMultimodal, GemmaPerLayerInputsUseTheirLookupModel) {
     models.models["text_embeddings_per_layer"] =
         std::make_shared<ov::Model>(ov::OutputVector{per_layer}, ov::ParameterVector{per_layer_ids});
     InputsEmbedderGemma4 embedder(models, tokenizer, "CPU", {});
-    embedder.set_apply_chat_template_status(false);
+    embedder.set_prompt_formatting(PromptFormatting::Raw);
     embedder.set_audio_encoder([](const ov::Tensor&) {
         return std::vector<ov::Tensor>{ov::Tensor(ov::element::f32, {1, 2, 4})};
     });
@@ -507,9 +543,9 @@ TEST(GGUFMultimodal, ModernAudioHistorySwitchEditAndRollback) {
     using namespace ov::genai;
     GGUFTokenizer tokenizer(sentencepiece_config());
     InputsEmbedder embedder(gemma4_models(), tokenizer, "CPU", {});
-    embedder.set_apply_chat_template_status(false);
+    embedder.set_prompt_formatting(PromptFormatting::Raw);
     embedder.set_audio_encoder(first_sample_audio_features);
-    auto registry = std::make_shared<VisionRegistry>();
+    auto registry = std::make_shared<EmbeddingsRegistry>();
     const auto audio = [](float value) {
         ov::Tensor tensor(ov::element::f32, {1});
         tensor.data<float>()[0] = value;
@@ -614,7 +650,7 @@ TEST(GGUFMultimodal, MiniCPMPositionSectionsPreserveCanvasPositionsAndRopeDelta)
         models.config.vision_config_window_kernel_size = 1;
         models.config.merge_kernel_size = 1;
         InputsEmbedderMiniCPMv4_7 embedder(models, tokenizer, "CPU", {});
-        embedder.set_apply_chat_template_status(false);
+        embedder.set_prompt_formatting(PromptFormatting::Raw);
         VLMPerfMetrics metrics;
         const auto embeddings = embedder.get_inputs_embeds(prompt, {image}, metrics, true, {0});
         ASSERT_EQ(embeddings.get_shape(), (ov::Shape{1, 11, 4}));
@@ -737,7 +773,7 @@ TEST(GGUFMultimodal, Gemma3nPaddingPlaceholderPreservesImageAndPerLayerSpans) {
     models.models["text_embeddings_per_layer"] =
         std::make_shared<ov::Model>(ov::OutputVector{per_layer}, ov::ParameterVector{ids});
     InputsEmbedderGemma3n embedder(models, tokenizer, "CPU", {});
-    embedder.set_apply_chat_template_status(false);
+    embedder.set_prompt_formatting(PromptFormatting::Raw);
     std::vector<EncodedImage> images;
     for (const auto value : {7.f, 11.f}) {
         images.push_back(EncodedImage{ov::Tensor(ov::element::f32, {1, 256, 4})});
@@ -795,17 +831,20 @@ TEST(GGUFMultimodal, Gemma3ImageSeparatorFollowsModelConfig) {
     }
 }
 
-TEST(GGUFMultimodal, MuseVideoKeepsFramesWhenSamplingIsDisabled) {
+TEST(GGUFMultimodal, MuseVideoUsesGgufDefaultsAndKeepsFrames) {
     using namespace ov::genai;
-    auto models = gemma4_models();
-    models.config.model_type = VLMModelType::MUSE_GLIMMER;
-    models.processor_config.patch_size = 2;
-    models.processor_config.merge_size = 2;
-    models.processor_config.temporal_patch_size = 1;
-    models.video_processor_config.patch_size = 2;
-    models.video_processor_config.merge_size = 2;
-    models.video_processor_config.temporal_patch_size = 1;
-    models.video_processor_config.do_sample_frames = false;
+    GGUFMultimodalModels gguf_models;
+    gguf_models.vlm = gemma4_models();
+    auto inputs = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{1, -1, 4});
+    inputs->output(0).set_names({"inputs_embeds"});
+    gguf_models.language = std::make_shared<ov::Model>(ov::OutputVector{inputs}, ov::ParameterVector{inputs});
+    auto mmproj = gguf_models.language->clone();
+    mmproj->set_rt_info(std::string("2"), {"gguf_mmproj", "clip.vision.patch_size"});
+    mmproj->set_rt_info(std::string("0.5,0.5,0.5"), {"gguf_mmproj", "clip.vision.image_mean"});
+    mmproj->set_rt_info(std::string("0.5,0.5,0.5"), {"gguf_mmproj", "clip.vision.image_std"});
+    mmproj->set_rt_info(std::string("2"), {"gguf_mmproj", "vision.merge"});
+    configure_gguf_multimodal_models(gguf_models, "muse-glimmer", "muse-glimmer", mmproj);
+    auto& models = gguf_models.vlm;
     auto pixels = std::make_shared<ov::op::v0::Parameter>(ov::element::f32, ov::PartialShape{-1, 12});
     pixels->output(0).set_names({"pixel_values"});
     auto grid = std::make_shared<ov::op::v0::Parameter>(ov::element::i64, ov::PartialShape{1, 3});
@@ -824,7 +863,7 @@ TEST(GGUFMultimodal, MuseVideoKeepsFramesWhenSamplingIsDisabled) {
     EXPECT_FLOAT_EQ(encoded[0].metadata.fps, 2.f);
     const auto assumed_fps = embedder.encode_videos({video});
     EXPECT_EQ(assumed_fps[0].frame_num, 3);
-    EXPECT_GT(assumed_fps[0].metadata.fps, 0.f);
+    EXPECT_FLOAT_EQ(assumed_fps[0].metadata.fps, 24.0f);
 }
 
 TEST(GGUFMultimodal, ImageOnlyProcessorConfigIsLoadedForBothModalities) {
@@ -852,7 +891,7 @@ TEST(GGUFMultimodal, LFM2AudioPlacementPreservesAdjacentAndReversedClips) {
     models.config.model_type = VLMModelType::LFM2_AUDIO;
     models.models.erase("vision_embeddings");
     InputsEmbedderLFM2Audio embedder(models, tokenizer, "CPU", {});
-    embedder.set_apply_chat_template_status(false);
+    embedder.set_prompt_formatting(PromptFormatting::Raw);
     embedder.set_audio_encoder(first_sample_audio_features);
     const auto sample = [](float value) {
         ov::Tensor audio(ov::element::f32, {1});
@@ -955,7 +994,7 @@ TEST(GGUFMultimodal, LFM2VisionTiledMarkersAndFeaturesFollowPromptOrder) {
     auto models = gemma4_models();
     models.config.model_type = VLMModelType::LFM2_VL;
     InputsEmbedderLFM2Vision embedder(models, tokenizer, "CPU", {});
-    embedder.set_apply_chat_template_status(false);
+    embedder.set_prompt_formatting(PromptFormatting::Raw);
     const auto image = [](float value, size_t tokens) {
         EncodedImage result;
         result.resized_source = ov::Tensor(ov::element::f32, {1, tokens, 4});
@@ -1088,4 +1127,22 @@ TEST(GGUFMultimodal, LFM2VisionNormalizesPixelsAndPadsTiledCanvas) {
 
 TEST(GGUFTokenizer, MetadataRejectsModelsWithoutTokenizerInfo) {
     EXPECT_THROW(ov::genai::GGUFTokenizerParameters::from_model(nullptr), ov::Exception);
+}
+
+TEST(GGUFTokenizer, Qwen35ChatTemplateUndefinedTestsArePatched) {
+    ov::genai::GGUFTokenizer tokenizer(byte_level_bpe_config("qwen35"));
+    ov::genai::ChatHistory history({{{"role", "user"}, {"content", "a"}}});
+    EXPECT_EQ(tokenizer.get_original_chat_template(), qwen35_chat_template);
+    EXPECT_EQ(tokenizer.apply_chat_template(history, false), "think:a");
+    history.set_extra_context(ov::genai::JsonContainer({{"enable_thinking", false}}));
+    EXPECT_EQ(tokenizer.apply_chat_template(history, false), "direct:a");
+
+    tokenizer.set_chat_template("{% if custom is undefined %}set{% endif %}");
+    EXPECT_EQ(tokenizer.apply_chat_template(history, false), "set");
+    EXPECT_EQ(tokenizer.apply_chat_template(history, false, "{% if other is undefined %}call{% endif %}"), "call");
+}
+
+TEST(GGUFTokenizer, NonQwen35ChatTemplateIsNotPatched) {
+    ov::genai::GGUFTokenizer tokenizer(byte_level_bpe_config("qwen2"));
+    EXPECT_EQ(tokenizer.get_chat_template(), qwen35_chat_template);
 }

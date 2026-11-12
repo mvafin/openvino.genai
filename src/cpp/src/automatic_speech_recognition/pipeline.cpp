@@ -9,7 +9,9 @@
 #include <unordered_map>
 
 #include "automatic_speech_recognition/models/fun-asr/pipeline.hpp"
-#include "automatic_speech_recognition/models/qwen3-asr/pipeline.hpp"
+#include "automatic_speech_recognition/models/qwen3-asr/encoder_decoder/pipeline.hpp"
+#include "automatic_speech_recognition/models/qwen3-asr/split/pipeline.hpp"
+#include "automatic_speech_recognition/models/sensevoice/pipeline.hpp"
 #include "automatic_speech_recognition/models/whisper/pipeline.hpp"
 #include "automatic_speech_recognition/pipeline_base.hpp"
 #include "utils.hpp"
@@ -22,7 +24,7 @@
 
 namespace {
 
-enum class ASRModelType { whisper, qwen3_asr, fun_asr };
+enum class ASRModelType { whisper, qwen3_asr, fun_asr, sense_voice };
 
 ASRModelType read_model_type(const std::filesystem::path& models_path) {
     auto config_path = models_path / "config.json";
@@ -37,6 +39,7 @@ ASRModelType read_model_type(const std::filesystem::path& models_path) {
         {"whisper", ASRModelType::whisper},
         {"qwen3_asr", ASRModelType::qwen3_asr},
         {"fun_asr", ASRModelType::fun_asr},
+        {"sense_voice", ASRModelType::sense_voice},
     };
 
     auto it = model_types_map.find(value);
@@ -44,6 +47,24 @@ ASRModelType read_model_type(const std::filesystem::path& models_path) {
         return it->second;
     }
     OPENVINO_THROW("Unsupported '", value, "' ASR model type");
+}
+
+bool is_qwen3_asr_split_export(const std::filesystem::path& models_path) {
+    return std::filesystem::exists(models_path / "openvino_audio_encoder_model.xml");
+}
+
+// Only Qwen3-ASR split export implements PagedAttention backend. Other models run SDPA-like stateful decoders.
+ov::AnyMap remove_sdpa_attention_backend(const ov::AnyMap& properties) {
+    const auto attention_backend_it = properties.find("ATTENTION_BACKEND");
+    if (attention_backend_it == properties.end()) {
+        return properties;
+    }
+    // Reject PA before extract_attention_backend() checks PagedAttention platform availability.
+    OPENVINO_ASSERT(attention_backend_it->second.as<std::string>() != ov::genai::PA_BACKEND,
+                    "'",
+                    ov::genai::PA_BACKEND,
+                    "' attention backend is supported only for Qwen3-ASR split export");
+    return ov::genai::utils::extract_attention_backend(properties).first;
 }
 
 std::optional<ov::genai::ASRGenerationConfig> get_config_from_map(const ov::AnyMap& config_map) {
@@ -71,7 +92,7 @@ ASRPipeline::ASRPipeline(const std::filesystem::path& models_path,
         runtime.erase(projector);
         auto gguf_properties = gguf_utils::extract_gguf_properties(runtime);
         OPENVINO_ASSERT(!gguf_properties.legacy_reader.value_or(false), "GGUF ASR requires gguf_reader=FRONTEND");
-        runtime = std::move(gguf_properties.rest);
+        runtime = remove_sdpa_attention_backend(gguf_properties.rest);
         namespace gguf = ov::frontend::gguf;
         gguf::FrontEnd frontend;
         const auto extension =
@@ -88,13 +109,13 @@ ASRPipeline::ASRPipeline(const std::filesystem::path& models_path,
         const auto mel_bins =
             std::stoull(encoder->get_rt_info<std::string>({"gguf_mmproj", "clip.audio.num_mel_bins"}));
         gguf::pass::AdaptMmprojToGenAI(gguf::pass::AdaptMmprojToGenAI::Modality::AUDIO).run_on_model(encoder);
-        m_impl = std::make_unique<Qwen3ASR>(tokenizer,
-                                            encoder,
-                                            decoder,
-                                            extension->get_embedding_model(),
-                                            mel_bins,
-                                            device,
-                                            runtime);
+        m_impl = std::make_unique<Qwen3EncoderDecoderASR>(tokenizer,
+                                                         encoder,
+                                                         decoder,
+                                                         extension->get_embedding_model(),
+                                                         mel_bins,
+                                                         device,
+                                                         runtime);
         m_impl->m_load_time_ms =
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time)
                 .count();
@@ -106,19 +127,29 @@ ASRPipeline::ASRPipeline(const std::filesystem::path& models_path,
     OPENVINO_ASSERT(!properties.count(ov::genai::forced_aligner.name()) || model_type == ASRModelType::qwen3_asr,
                     "'forced_aligner' is only supported for Qwen3-ASR models.");
 
-    switch (model_type) {
-    case ASRModelType::whisper: {
-        m_impl = std::make_unique<WhisperASRPipelineAdapter>(models_path, device, properties);
-        break;
-    }
-    case ASRModelType::qwen3_asr: {
-        m_impl = std::make_unique<Qwen3ASR>(models_path, device, properties);
-        break;
-    }
-    case ASRModelType::fun_asr: {
-        m_impl = std::make_unique<FunASR>(models_path, device, properties);
-        break;
-    }
+    // Split export: audio encoder, text embeddings and language model.
+    if (model_type == ASRModelType::qwen3_asr && is_qwen3_asr_split_export(models_path)) {
+        m_impl = create_qwen3_asr_split_pipeline(models_path, device, properties);
+    } else {
+        const ov::AnyMap impl_properties = remove_sdpa_attention_backend(properties);
+        switch (model_type) {
+        case ASRModelType::whisper: {
+            m_impl = std::make_unique<WhisperASRPipelineAdapter>(models_path, device, impl_properties);
+            break;
+        }
+        case ASRModelType::qwen3_asr: {
+            m_impl = std::make_unique<Qwen3EncoderDecoderASR>(models_path, device, impl_properties);
+            break;
+        }
+        case ASRModelType::fun_asr: {
+            m_impl = std::make_unique<FunASR>(models_path, device, impl_properties);
+            break;
+        }
+        case ASRModelType::sense_voice: {
+            m_impl = std::make_unique<SenseVoiceSmall>(models_path, device, impl_properties);
+            break;
+        }
+        }
     }
     const auto stop_time = std::chrono::steady_clock::now();
     m_impl->m_load_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(stop_time - start_time).count();
@@ -128,7 +159,18 @@ ASRDecodedResults ASRPipeline::generate(const AudioInputs& audio_inputs,
                                         const std::optional<ASRGenerationConfig>& generation_config,
                                         StreamerVariant streamer) {
     const std::shared_ptr<StreamerBase> base_streamer = utils::create_streamer(streamer, m_impl->m_tokenizer);
-    return m_impl->generate(audio_inputs, generation_config, base_streamer);
+    const AudiosView audios = std::visit(
+        utils::overloaded{
+            [](const std::vector<float>& audio) {
+                return AudiosView{std::cref(audio)};
+            },
+            [](const std::vector<std::vector<float>>& audio_batch) {
+                OPENVINO_ASSERT(!audio_batch.empty(), "ASRPipeline::generate() requires a non-empty audio batch");
+                return AudiosView(audio_batch.begin(), audio_batch.end());
+            },
+        },
+        audio_inputs);
+    return m_impl->generate(audios, generation_config, base_streamer);
 }
 
 ASRDecodedResults ASRPipeline::generate(const AudioInputs& audio_inputs, const ov::AnyMap& config_map) {
@@ -136,10 +178,7 @@ ASRDecodedResults ASRPipeline::generate(const AudioInputs& audio_inputs, const o
     ASRGenerationConfig config = config_arg.has_value() ? *config_arg : get_generation_config();
     config.update_generation_config(config_map);
 
-    StreamerVariant streamer_variant = utils::get_streamer_from_map(config_map);
-    const std::shared_ptr<StreamerBase> base_streamer = utils::create_streamer(streamer_variant, m_impl->m_tokenizer);
-
-    return m_impl->generate(audio_inputs, config, base_streamer);
+    return generate(audio_inputs, config, utils::get_streamer_from_map(config_map));
 }
 
 Tokenizer ASRPipeline::get_tokenizer() {

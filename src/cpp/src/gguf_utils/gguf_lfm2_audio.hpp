@@ -22,7 +22,7 @@ ov::Tensor lfm2_spectrum_to_waveform(const ov::Tensor& spectral,
 #    include "visual_language/inputs_embedder.hpp"
 
 namespace ov::genai {
-class VisionRegistry;
+class EmbeddingsRegistry;
 
 class GGUFLFM2Speech {
 public:
@@ -52,7 +52,7 @@ private:
     bool m_interleaved = true;
     size_t m_text_cadence = 6, m_audio_cadence = 12;
     std::mutex m_mutex;
-    std::shared_ptr<VisionRegistry> m_registry;
+    std::shared_ptr<EmbeddingsRegistry> m_registry;
 };
 }  // namespace ov::genai
 #endif

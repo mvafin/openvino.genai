@@ -799,7 +799,8 @@ void get_npu_text_rerank_config(ov::AnyMap& properties,
                                 const TextRerankPipeline::Config& text_rerank_config) {
     const auto max_length = static_cast<uint32_t>(text_rerank_config.max_length.value_or(1024u));
     kv_desc.max_prompt_len = pop_int_and_cast(properties, "MAX_PROMPT_LEN").value_or(max_length);
-    kv_desc.min_response_len = pop_int_and_cast(properties, "MIN_RESPONSE_LEN").value_or(128u);
+    // A reranker only prefills, so it needs no response window.
+    kv_desc.min_response_len = pop_int_and_cast(properties, "MIN_RESPONSE_LEN").value_or(0u);
     update_npu_config(properties, kv_pos, kv_desc);
     update_config(properties, {"NPUW_TEXT_RERANK", "YES"});
 }
@@ -983,6 +984,7 @@ void validate_vlm_model_properties(const ov::AnyMap& properties) {
         "multi_modal_projector",
         "audio_encoder",
         "language_model",
+        "ngram_embeddings",
     };
     const auto it = properties.find(PER_MODEL_PROPERTIES);
     if (it == properties.end()) {
@@ -1307,14 +1309,14 @@ ov::genai::GenerationConfig get_multinomial_config() {
     return multinomial_config;
 }
 
-std::string join_multiline_string_literals(const std::string& chat_template) {
+std::string patch_chat_template_multiline_strings(const std::string& chat_template) {
     const std::regex multiline_string_concatenation{R"("[ \t]*\r?\n[ \t]*")"};
     return std::regex_replace(chat_template, multiline_string_concatenation, "");
 }
 
-std::string replace_is_undefined_tests(const std::string& chat_template) {
-    const std::regex var_is_undefined_pattern{R"((\b[\w\.]+)\s+is\s+undefined)"};
-    return std::regex_replace(chat_template, var_is_undefined_pattern, "not $1 is defined");
+std::string patch_chat_template_undefined_tests(const std::string& chat_template) {
+    const std::regex var_is_undefined{R"((\b[\w\.]+)\s+is\s+undefined)"};
+    return std::regex_replace(chat_template, var_is_undefined, "not $1 is defined");
 }
 
 }  // namespace utils

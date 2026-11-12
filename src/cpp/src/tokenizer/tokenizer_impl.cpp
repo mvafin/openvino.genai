@@ -55,6 +55,13 @@ std::string remap_template(const std::string& chat_template) {
     return chat_template;
 }
 
+// Single place defining transform order: common remap first, then model-specific patch.
+std::string remap_and_patch_template(const std::string& chat_template,
+                                     const std::function<std::string(const std::string&)>& patcher) {
+    std::string result = remap_template(chat_template);
+    return patcher ? patcher(result) : result;
+}
+
 void parse_chat_template_from_file(const std::filesystem::path& path, std::string& value) {
     if (!std::filesystem::exists(path)) {
         return;
@@ -353,6 +360,9 @@ void Tokenizer::TokenizerImpl::setup_tokenizer(const std::filesystem::path& mode
         }
 
         setup_tokenizer(std::make_pair(ov_tokenizer, ov_detokenizer), filtered_properties);
+        if (auto patcher = gguf_chat_template_patcher(tokenizer_config)) {
+            set_chat_template_patcher(std::move(patcher));
+        }
         return;
     }
     if (std::filesystem::exists(models_path / "openvino_tokenizer.xml")) {
@@ -833,14 +843,27 @@ std::string Tokenizer::TokenizerImpl::apply_chat_template(
     bool add_generation_prompt,
     const std::string& chat_template,
     const std::optional<JsonContainer>& tools,
-    const std::optional<JsonContainer>& extra_context
+    const std::optional<JsonContainer>& extra_context,
+    const ov::AnyMap& properties
 ) const {
+    for (const auto& [name, value] : properties) {
+        OPENVINO_ASSERT(name == ov::genai::apply_polyfills.name(),
+                        "Unsupported apply_chat_template property: ", name);
+    }
+    minja::chat_template_options minja_options;
+    ov::genai::utils::read_anymap_param(properties, ov::genai::apply_polyfills.name(), minja_options.apply_polyfills);
+
     std::string chat_tpl;
     if (chat_template.empty()) {
         std::lock_guard<std::mutex> lock(m_chat_template_mutex);
         chat_tpl = m_chat_template;
     } else {
-        chat_tpl = remap_template(chat_template);
+        std::function<std::string(const std::string&)> patcher;
+        {
+            std::lock_guard<std::mutex> lock(m_chat_template_mutex);
+            patcher = m_chat_template_patcher;
+        }
+        chat_tpl = remap_and_patch_template(chat_template, patcher);
     }
 
     auto resolved_tools = tools.value_or(history.get_tools());
@@ -864,16 +887,16 @@ std::string Tokenizer::TokenizerImpl::apply_chat_template(
     if (!resolved_extra_context.empty()) {
         minja_inputs.extra_context.update(resolved_extra_context);
     }
-    
     const auto render = [&](const std::string& tpl) {
-        return get_cached_minja_chat_template(tpl)->apply(minja_inputs);
+        return get_cached_minja_chat_template(tpl)->apply(minja_inputs, minja_options);
     };
     std::string result;
     try {
         result = render(chat_tpl);
     } catch (const std::exception& error) {
         // minja lacks some Jinja constructs.
-        const auto rewritten = utils::join_multiline_string_literals(utils::replace_is_undefined_tests(chat_tpl));
+        const auto rewritten =
+            utils::patch_chat_template_multiline_strings(utils::patch_chat_template_undefined_tests(chat_tpl));
         if (rewritten != chat_tpl) {
             try {
                 result = render(rewritten);
@@ -896,11 +919,16 @@ std::string Tokenizer::TokenizerImpl::apply_chat_template(
 }
 
 void Tokenizer::TokenizerImpl::set_chat_template(const std::string& chat_template) {
-    auto remapped_chat_template = remap_template(chat_template);
-
     std::lock_guard<std::mutex> lock(m_chat_template_mutex);
+    m_chat_template = remap_and_patch_template(chat_template, m_chat_template_patcher);
     m_original_chat_template = chat_template;
-    m_chat_template = std::move(remapped_chat_template);
+    m_minja_chat_template_cache.clear();
+}
+
+void Tokenizer::TokenizerImpl::set_chat_template_patcher(std::function<std::string(const std::string&)> patcher) {
+    std::lock_guard<std::mutex> lock(m_chat_template_mutex);
+    m_chat_template_patcher = std::move(patcher);
+    m_chat_template = remap_and_patch_template(m_chat_template, m_chat_template_patcher);
     m_minja_chat_template_cache.clear();
 }
 

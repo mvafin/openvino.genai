@@ -137,16 +137,6 @@ private:
     size_t m_token_count = 0;
 };
 
-inline void ensure_num_assistant_tokens_is_set(GenerationConfig& config) {
-    OPENVINO_ASSERT(config.assistant_confidence_threshold == 0.f,
-                    "DFlash CB/PA only supports num_assistant_tokens; assistant_confidence_threshold must be 0.f.");
-    OPENVINO_ASSERT(config.max_ngram_size == 0,
-                    "DFlash CB/PA does not support prompt lookup decoding; max_ngram_size must be 0.");
-    if (!config.num_assistant_tokens.has_value() || config.num_assistant_tokens.value() == 0) {
-        config.num_assistant_tokens = DEFAULT_NUM_ASSISTANT_TOKENS;
-    }
-}
-
 inline void ensure_vlm_generation_config(const GenerationConfig& config) {
     // Keep generic DFlash decoding behavior unchanged. These checks cover only
     // VLM representation/output modes that cannot be expressed faithfully with
@@ -165,19 +155,14 @@ inline std::vector<int64_t> build_placeholder_prompt_ids(size_t prompt_length, i
     return std::vector<int64_t>(prompt_length, placeholder_id);
 }
 
-inline size_t linear_attention_checkpoint_block_count(size_t num_assistant_tokens) {
-    OPENVINO_ASSERT(num_assistant_tokens <= std::numeric_limits<size_t>::max() - 2,
-                    "DFlash num_assistant_tokens is too large for linear attention checkpoint block count.");
-    return num_assistant_tokens + 2;
-}
-
-inline size_t adjusted_linear_attention_block_count(size_t current_block_count,
-                                                    size_t num_assistant_tokens,
-                                                    bool target_has_linear_attention) {
-    if (!target_has_linear_attention) {
-        return current_block_count;
-    }
-    return std::max(current_block_count, linear_attention_checkpoint_block_count(num_assistant_tokens));
+inline size_t max_assistant_tokens_for_linear_attention(size_t max_assistant_tokens,
+                                                        size_t num_linear_attention_blocks,
+                                                        bool target_has_linear_attention) {
+    if (!target_has_linear_attention)
+        return max_assistant_tokens;
+    if (num_linear_attention_blocks == 0)
+        return std::min(max_assistant_tokens, std::numeric_limits<size_t>::max() - 2);
+    return std::min(max_assistant_tokens, num_linear_attention_blocks > 2 ? num_linear_attention_blocks - 2 : 0);
 }
 
 inline ov::Tensor build_draft_input_ids(int64_t seed_token,

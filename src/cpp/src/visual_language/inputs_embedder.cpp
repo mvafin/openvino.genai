@@ -50,6 +50,7 @@ std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedder::IInputsEmbedder::g
 
 void InputsEmbedder::IInputsEmbedder::start_chat(const std::string& system_message) {
     m_is_chat_conversation = true;
+    m_cached_text_embeds = ov::Tensor();
     if (!m_cache_state.get_state().empty()) {
         m_cache_state.reset_state();
     }
@@ -76,8 +77,16 @@ void InputsEmbedder::IInputsEmbedder::update_chat_history(const std::string& dec
 
 void InputsEmbedder::IInputsEmbedder::finish_chat() {
     m_is_chat_conversation = false;
+    m_cached_text_embeds = ov::Tensor();
     m_cache_state.reset_state();
 }
+
+InputsEmbedder::IInputsEmbedder::IInputsEmbedder(const VLMConfig& vlm_config,
+                                                 const Tokenizer& tokenizer,
+                                                 EmbeddingsModel::Ptr embedding)
+    : m_vlm_config{vlm_config},
+      m_embedding{std::move(embedding)},
+      m_tokenizer{tokenizer} {}
 
 InputsEmbedder::IInputsEmbedder::IInputsEmbedder(const VLMModels& models,
                                                  const Tokenizer& tokenizer,
@@ -179,7 +188,7 @@ std::vector<EncodedAudio> InputsEmbedder::IInputsEmbedder::encode_audios_with_en
 ov::Tensor InputsEmbedder::IInputsEmbedder::apply_chat_template_tokenize(const std::string& prompt, ov::genai::VLMPerfMetrics& metrics) {
     const bool add_special_tokens =
         m_add_special_tokens_is_set ? m_add_special_tokens
-                                   : !(m_is_chat_conversation || m_apply_chat_template || m_prompt_is_templated);
+                                   : !m_is_chat_conversation && m_prompt_formatting == PromptFormatting::Raw;
     ManualTimer encode_timer("Encode");
     encode_timer.start();
 
@@ -193,7 +202,7 @@ ov::Tensor InputsEmbedder::IInputsEmbedder::apply_chat_template_tokenize(const s
         ov::Tensor encoded_input_ids;
         bool apply_template = false;
         TimePoint template_end_time;
-        if (m_apply_chat_template) {
+        if (m_prompt_formatting == PromptFormatting::NeedsTemplate) {
             std::string templated_prompt;
             ChatHistory history({{{"role", "user"}, {"content", prompt}}});
             constexpr bool add_generation_prompt = true;
@@ -257,9 +266,6 @@ ov::Tensor InputsEmbedder::IInputsEmbedder::sample_video_if_needed(
     
     const size_t video_frames_num = video_shape[0];
     
-    OPENVINO_ASSERT(video_metadata.frames_indices.size() <= video_frames_num,
-        "Number of frames to sample cannot be greater than total number of frames in the video.");
-
     if (video_metadata.frames_indices.empty()) {
         return video;
     }
@@ -445,6 +451,11 @@ std::function<ov::Tensor(const ov::Tensor& new_input_ids)> InputsEmbedder::get_p
     return m_impl->get_per_layer_embeddings_callback();
 }
 
+std::function<ov::Tensor(const ov::Tensor& new_input_ids, const std::vector<int32_t>& beam_indices)>
+InputsEmbedder::get_ngram_embeddings_callback() {
+    return m_impl->get_ngram_embeddings_callback();
+}
+
 std::vector<ov::genai::EncodedImage> InputsEmbedder::encode_images(const std::vector<ov::Tensor>& images) {
     return m_impl->encode_images(images);
 }
@@ -499,6 +510,14 @@ void InputsEmbedder::set_rope_delta(int64_t rope_delta) {
     m_impl->set_rope_delta(rope_delta);
 }
 
+ov::Tensor InputsEmbedder::get_cached_text_embeds() const {
+    return m_impl->get_cached_text_embeds();
+}
+
+void InputsEmbedder::set_cached_text_embeds_enabled(bool enabled) {
+    m_impl->set_cached_text_embeds_enabled(enabled);
+}
+
 std::pair<ov::Tensor, std::optional<int64_t>> InputsEmbedder::get_generation_phase_position_ids(const size_t inputs_embeds_size, const size_t history_size, int64_t rope_delta) {
     return m_impl->get_generation_phase_position_ids(inputs_embeds_size, history_size, rope_delta);
 }
@@ -523,8 +542,8 @@ void InputsEmbedder::update_chat_history(const std::string& decoded_results, con
     m_impl->update_chat_history(decoded_results, generation_finish_status);
 }
 
-void InputsEmbedder::set_apply_chat_template_status(bool apply_chat_template, bool prompt_is_templated) {
-    m_impl->set_apply_chat_template_status(apply_chat_template, prompt_is_templated);
+void InputsEmbedder::set_prompt_formatting(PromptFormatting prompt_formatting) {
+    m_impl->set_prompt_formatting(prompt_formatting);
 }
 
 void InputsEmbedder::finish_chat() {

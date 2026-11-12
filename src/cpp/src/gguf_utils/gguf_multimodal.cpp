@@ -181,6 +181,7 @@ Configs gguf_configs(const std::string& architecture,
         c.image["temporal_patch_size"] = 1;
         c.image["max_image_tokens"] = 4096;
         c.unsampled_video_from_image();
+        c.video["fps"] = 24.0;
         c.video["max_video_frame_tokens"] = 4096;
         return c;
     }
@@ -202,6 +203,16 @@ Configs gguf_configs(const std::string& architecture,
     return c;
 }
 }  // namespace
+
+void configure_gguf_multimodal_models(GGUFMultimodalModels& models,
+                                      const std::string& architecture,
+                                      const std::string& projector,
+                                      const std::shared_ptr<ov::Model>& mmproj) {
+    const auto configs = gguf_configs(architecture, projector, MmprojMetadata(mmproj), models);
+    models.vlm.config = VLMConfig(configs.config);
+    models.vlm.processor_config = ProcessorConfig(configs.image);
+    models.vlm.video_processor_config = VideoProcessorConfig(configs.video);
+}
 
 GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
                                           const std::filesystem::path& mmproj,
@@ -269,8 +280,7 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
     if (const auto& per_layer = genai->get_per_layer_embedding_model())
         vlm.models["text_embeddings_per_layer"] = per_layer;
 
-    const auto configs = gguf_configs(architecture, projector, meta, result);
-    vlm.config = VLMConfig(configs.config);
+    configure_gguf_multimodal_models(result, architecture, projector, combined);
     if (omni) {
         const auto& position_shape = result.language->input("position_ids").get_partial_shape();
         OPENVINO_ASSERT(position_shape.rank().is_static() && position_shape.rank().get_length() == 3 &&
@@ -285,8 +295,6 @@ GGUFMultimodalModels read_gguf_multimodal(const std::filesystem::path& language,
         vlm.config.image_token_id = omni_image_token_id;
         vlm.config.video_token_id = omni_video_token_id;
     }
-    vlm.processor_config = ProcessorConfig(configs.image);
-    vlm.video_processor_config = VideoProcessorConfig(configs.video);
     if (architecture == "gemma3" || gemma3n) {
         vlm.config.image_soft_token = "<pad>";
         const auto placeholder = result.tokenizer.encode(vlm.config.image_soft_token, add_special_tokens(false));

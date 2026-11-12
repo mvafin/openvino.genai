@@ -18,7 +18,7 @@
 #    include "openvino/genai/omni/pipeline.hpp"
 #    include "openvino/opsets/opset15.hpp"
 #    include "utils.hpp"
-#    include "visual_language/vision_registry.hpp"
+#    include "visual_language/embeddings_registry.hpp"
 #    include "visual_language/vlm_chat_context.hpp"
 
 namespace ov::genai {
@@ -253,13 +253,13 @@ OmniDecodedResults GGUFLFM2Speech::generate(const ChatHistory& history,
     const auto started = std::chrono::steady_clock::now();
     OmniDecodedResults result;
     if (!m_registry)
-        m_registry = std::make_shared<VisionRegistry>();
+        m_registry = std::make_shared<EmbeddingsRegistry>();
     VLMChatContext chat(history, m_registry, *m_embedder);
     try {
         auto data = chat.process({}, {}, {}, audios);
         auto prompt = m_models.tokenizer.apply_chat_template(data.normalized_history, true);
         m_embedder->finish_chat();
-        m_embedder->set_apply_chat_template_status(false, true);
+        m_embedder->set_prompt_formatting(PromptFormatting::AlreadyTemplated);
         auto embeds = m_embedder->get_inputs_embeds(prompt,
                                                     {},
                                                     {},

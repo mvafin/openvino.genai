@@ -51,6 +51,11 @@ Explore blogs to setup your first hands-on experience with OpenVINO GenAI:
     ```sh
     optimum-cli export openvino --model TinyLlama/TinyLlama-1.1B-Chat-v1.0 --weight-format int4 --trust-remote-code TinyLlama_1_1b_v1_ov
     ```
+    Alternatively, use `genai-cli` (**preview**), the export tool shipped with OpenVINO GenAI. It takes the same options as `optimum-cli export openvino`:
+    ```sh
+    pip install openvino-genai[export]
+    genai-cli export -m TinyLlama/TinyLlama-1.1B-Chat-v1.0 --weight-format int4 TinyLlama_1_1b_v1_ov
+    ```
 3. Run inference:
     ```python
     import openvino_genai as ov_genai
@@ -97,6 +102,7 @@ Continuous batching functionality is used within OpenVINO Model Server (OVMS) to
 
 - [OpenVINO Generative AI workflow](https://docs.openvino.ai/2026/openvino-workflow-generative.html)
 - [Optimum Intel and OpenVINO](https://huggingface.co/docs/optimum/intel/openvino/export)
+- [genai-cli (preview): model export with OpenVINO GenAI](https://openvinotoolkit.github.io/openvino.genai/docs/guides/model-preparation/convert-to-openvino#genai-cli)
 - [OpenVINO Notebooks with GenAI](https://openvinotoolkit.github.io/openvino_notebooks/?libraries=OpenVINO+GenAI)
 
 ## License
@@ -130,7 +136,9 @@ In each tested repetition it accepts 23 of 68 proposed draft tokens. GGUF `d2t` 
 absolute token IDs, which GenAI converts to the sampler's offsets.
 DFlash accepts one active request, greedy decoding and disabled prefix caching; its
 Qwen3.6-35B-A3B pair passes repeated PA generation with 4 of 65 drafts accepted per
-repetition. DeepSeek-V4 and multiple active
+repetition. For a linear-attention target, an explicit `num_linear_attention_blocks`
+limit must allow at least `num_assistant_tokens + 2` blocks for speculative verification;
+zero enables automatic pool sizing. DeepSeek-V4 and multiple active
 DFlash requests are deferred.
 
 AFMoE (Trinity-Nano-Preview Q4_K_S) and Qwen3-Omni-30B-A3B-Instruct Q4_K_M have

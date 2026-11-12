@@ -249,6 +249,26 @@ void ContinuousBatchingPipeline::SpeculativeDecodingImpl::step() {
         }
         m_draft_pipeline->sync_generated_embeddings();
 
+        // The main request continues alone when its draft request ended: the draft pipeline ran out of KV cache
+        // (IGNORED, logged here) or stopped the request itself (STOP, logged where it stopped; only a DFlash window
+        // that could not run). A handle is dropped only after its request ended, since dropping it stops the request.
+        // An ended draft request is no longer among the draft's generated requests, so it is dropped here even when
+        // the main request finished in this step.
+        for (auto draft_it = m_draft_generations.begin(); draft_it != m_draft_generations.end();) {
+            const uint64_t request_id = draft_it->first;
+            const GenerationStatus draft_status = draft_it->second->get_status();
+            if (draft_status != GenerationStatus::IGNORED && draft_status != GenerationStatus::STOP) {
+                ++draft_it;
+                continue;
+            }
+            if (draft_status == GenerationStatus::IGNORED && main_generated_requests.count(request_id)) {
+                GENAI_WARN("Request %llu: the draft model ran out of KV cache; continuing without speculative decoding.",
+                           static_cast<unsigned long long>(request_id));
+            }
+            m_draft_pipeline->finish_request(request_id);
+            draft_it = m_draft_generations.erase(draft_it);
+        }
+
         // finish draft request if the generation was completed
         for (const auto& draft_request : draft_generated_requests) {
             auto request_id = draft_request.first;
@@ -326,18 +346,13 @@ ContinuousBatchingPipeline::SpeculativeDecodingImpl::generate(const std::vector<
     strategy.prepare_request = [this](size_t,
                                   const ov::Tensor& in_ids,
                                   GenerationConfig& main_cfg,
-                                  GenerationConfig& draft_cfg,
-                                  ov::Tensor& main_in,
-                                  ov::Tensor& draft_in) {
+                                  ov::Tensor& main_in) {
         if (main_cfg.assistant_confidence_threshold == 0.f) {
             if (!main_cfg.num_assistant_tokens.has_value() || main_cfg.num_assistant_tokens.value() == 0) {
                 main_cfg.num_assistant_tokens = m_main_pipeline->default_num_assistant_tokens;
             }
         }
-        draft_cfg.ignore_eos = true;
-        draft_cfg.stop_strings = {};
         main_in = in_ids;
-        draft_in = in_ids;
     };
     strategy.check_streaming = [](const std::shared_ptr<ThreadedStreamerWrapper>& streamer_ptr,
                                   const std::vector<ov::Tensor>& input_ids,
@@ -362,17 +377,22 @@ ContinuousBatchingPipeline::SpeculativeDecodingImpl::get_speculative_decoding_me
 };
 
 void ContinuousBatchingPipeline::SpeculativeDecodingImpl::drop_requests() {
-    m_draft_pipeline->finish_request();
+    if (m_draft_pipeline) {
+        m_draft_pipeline->finish_request();
+    }
     m_main_pipeline->finish_request();
 }
 
 
 bool ContinuousBatchingPipeline::SpeculativeDecodingImpl::is_requests_empty() {
-    return m_main_pipeline->is_requests_empty() && m_draft_pipeline->is_requests_empty();
+    return m_main_pipeline->is_requests_empty() && (!m_draft_pipeline || m_draft_pipeline->is_requests_empty());
 }
 
 std::vector<SequenceGroup::Ptr> ContinuousBatchingPipeline::SpeculativeDecodingImpl::get_awaiting_requests() {
     auto main_awaiting_requests = m_main_pipeline->get_awaiting_requests();
+    if (!m_draft_pipeline) {
+        return main_awaiting_requests;
+    }
     auto draft_awaiting_requests = m_draft_pipeline->get_awaiting_requests();
     validate_awaiting_requests(main_awaiting_requests, draft_awaiting_requests);
     return main_awaiting_requests;
