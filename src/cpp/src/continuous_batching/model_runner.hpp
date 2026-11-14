@@ -5,6 +5,7 @@
 
 #include <vector>
 #include <cstdlib>
+#include <limits>
 #include <set>
 
 #include <openvino/runtime/infer_request.hpp>
@@ -744,12 +745,25 @@ public:
         block_indices_begins_data[0] = 0;
 
         bool matmul_gathering_is_available = false;
+        bool shared_kv_pruning_is_available = false;
         size_t gathering_current_index = 0;
         std::vector<int64_t> gather_indices_values;
+        std::vector<int64_t> shared_kv_tokens_indices_values;
+        std::vector<int32_t> shared_kv_past_lens_values;
+        std::vector<int32_t> shared_kv_subsequence_begins_values{0};
         try {
             std::ignore = m_request.get_tensor("sampled_tokens_indices");
             matmul_gathering_is_available = true;
         } catch (const ov::Exception&) {}
+        try {
+            std::ignore = m_request.get_tensor("shared_kv_tokens_indices");
+            std::ignore = m_request.get_tensor("shared_kv_past_lens");
+            std::ignore = m_request.get_tensor("shared_kv_subsequence_begins");
+            shared_kv_pruning_is_available = true;
+        } catch (const ov::Exception&) {}
+        OPENVINO_ASSERT(!shared_kv_pruning_is_available || matmul_gathering_is_available,
+                        "Shared-KV pruning requires the sampled_tokens_indices input");
+        const bool prune_shared_kv_rows = shared_kv_pruning_is_available && m_hidden_state_flags == 0;
 
         size_t current_token_idx = 0;
         std::map<size_t, std::set<size_t>> seq_id_to_skipped_blocks_map;
@@ -785,6 +799,7 @@ public:
             for (size_t seq_idx = 0; seq_idx < num_running_sequences; ++seq_idx) {
                 output_seq_len = 0;
                 Sequence::CPtr sequence = running_sequences[seq_idx];
+                const size_t shared_kv_sequence_begin = shared_kv_tokens_indices_values.size();
 
                 if (sequence_group_type == SequenceGroupType::EMBEDDINGS) {
                     // compute token_type_ids for current sequence
@@ -946,17 +961,36 @@ public:
                     // Check if token gathering is required for the entire sequence group
                     if (matmul_gathering_is_available && (sampling_is_required || echo_output)) {
                         // Determine if the current token should be gathered
-                        if (echo_output ||
+                        const bool should_gather =
+                            echo_output ||
                             // Skip gathering for prompt tokens
-                            group_position_id + token_id >= prompt_len - 1 &&
-                            // Gather only the last scheduled token or 1 + num_tokens_to_validate tokens for SD
-                            // In SD, tokens_to_sample_per_sequence may exceed num_scheduled_tokens
-                            token_id + tokens_to_sample_per_sequence >= num_scheduled_tokens) {
-                            gather_indices_values.push_back(gathering_current_index);
+                            (group_position_id + token_id >= prompt_len - 1 &&
+                             // Gather only the last scheduled token or 1 + num_tokens_to_validate tokens for SD
+                             // In SD, tokens_to_sample_per_sequence may exceed num_scheduled_tokens
+                             token_id + tokens_to_sample_per_sequence >= num_scheduled_tokens);
+                        if (should_gather) {
+                            if (prune_shared_kv_rows) {
+                                gather_indices_values.push_back(
+                                    static_cast<int64_t>(shared_kv_tokens_indices_values.size()));
+                                shared_kv_tokens_indices_values.push_back(
+                                    static_cast<int64_t>(gathering_current_index));
+                            } else {
+                                gather_indices_values.push_back(static_cast<int64_t>(gathering_current_index));
+                            }
                             output_seq_len++;
                         }
                     }
+                    if (shared_kv_pruning_is_available && !prune_shared_kv_rows) {
+                        shared_kv_tokens_indices_values.push_back(static_cast<int64_t>(gathering_current_index));
+                    }
                     position_ids_idx++;
+                }
+                if (prune_shared_kv_rows &&
+                    shared_kv_tokens_indices_values.size() == shared_kv_sequence_begin) {
+                    OPENVINO_ASSERT(num_scheduled_tokens > 0,
+                                    "Shared-KV pruning cannot select a fallback row for an empty sequence");
+                    shared_kv_tokens_indices_values.push_back(
+                        static_cast<int64_t>(current_token_idx + num_scheduled_tokens - 1));
                 }
 
                 const auto& kv_blocks = scheduler_output.get_kv_block_tables(sequence->get_id());
@@ -978,6 +1012,22 @@ public:
                 past_lens_data[0] = expected_kv_cache_size - num_past_blocks_to_ignore * m_block_size;
 
                 subsequence_begins_data[1] = subsequence_begins_data[0] + num_scheduled_tokens;
+                if (shared_kv_pruning_is_available) {
+                    const size_t kept_rows = shared_kv_tokens_indices_values.size() - shared_kv_sequence_begin;
+                    const int64_t shared_past_len = static_cast<int64_t>(past_lens_data[0]) +
+                                                    static_cast<int64_t>(num_scheduled_tokens) -
+                                                    static_cast<int64_t>(kept_rows);
+                    OPENVINO_ASSERT(shared_past_len >= 0 &&
+                                        shared_past_len <= std::numeric_limits<int32_t>::max(),
+                                    "Shared-KV past length is outside the i32 range");
+                    shared_kv_past_lens_values.push_back(static_cast<int32_t>(shared_past_len));
+                    const int64_t shared_subsequence_end =
+                        static_cast<int64_t>(shared_kv_subsequence_begins_values.back()) +
+                        static_cast<int64_t>(kept_rows);
+                    OPENVINO_ASSERT(shared_subsequence_end <= std::numeric_limits<int32_t>::max(),
+                                    "Shared-KV subsequence length is outside the i32 range");
+                    shared_kv_subsequence_begins_values.push_back(static_cast<int32_t>(shared_subsequence_end));
+                }
 
                 block_indices_begins_data[1] = block_indices_begins_data[0] + num_blocks_utilized;
 
@@ -1105,6 +1155,25 @@ public:
             ov::Tensor gather_indices = m_request.get_tensor("sampled_tokens_indices");
             gather_indices.set_shape({gather_indices_values.size()});
             std::memcpy(gather_indices.data(), gather_indices_values.data(), gather_indices_values.size() * sizeof(int64_t));
+        }
+        if (shared_kv_pruning_is_available) {
+            auto shared_kv_tokens_indices = m_request.get_tensor("shared_kv_tokens_indices");
+            shared_kv_tokens_indices.set_shape({shared_kv_tokens_indices_values.size()});
+            std::memcpy(shared_kv_tokens_indices.data(),
+                        shared_kv_tokens_indices_values.data(),
+                        shared_kv_tokens_indices_values.size() * sizeof(int64_t));
+
+            auto shared_kv_past_lens = m_request.get_tensor("shared_kv_past_lens");
+            shared_kv_past_lens.set_shape({shared_kv_past_lens_values.size()});
+            std::memcpy(shared_kv_past_lens.data(),
+                        shared_kv_past_lens_values.data(),
+                        shared_kv_past_lens_values.size() * sizeof(int32_t));
+
+            auto shared_kv_subsequence_begins = m_request.get_tensor("shared_kv_subsequence_begins");
+            shared_kv_subsequence_begins.set_shape({shared_kv_subsequence_begins_values.size()});
+            std::memcpy(shared_kv_subsequence_begins.data(),
+                        shared_kv_subsequence_begins_values.data(),
+                        shared_kv_subsequence_begins_values.size() * sizeof(int32_t));
         }
 
         if (m_is_aggregate_attention_scores && !m_cached_score_aggregation_window) {
