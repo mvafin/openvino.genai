@@ -304,3 +304,13 @@ def test_mmproj_optimum_directory_and_map(mmproj_model, tmp_path):
             directory.generate(prompt, max_new_tokens=5, do_sample=False, **media).texts
             == serialized.generate(prompt, max_new_tokens=5, do_sample=False, **media).texts
         )
+
+    with pytest.raises(RuntimeError, match="INVALID_VALUE"):
+        genai.VLMPipeline(
+            models,
+            genai.Tokenizer(str(export)),
+            str(export),
+            "AUTO:CPU",
+            ATTENTION_BACKEND="SDPA",
+            MODEL_PROPERTIES={"language_model": {"DEVICE_PROPERTIES": {"CPU": {"NUM_STREAMS": "INVALID_VALUE"}}}},
+        )
