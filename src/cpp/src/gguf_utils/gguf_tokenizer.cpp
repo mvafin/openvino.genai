@@ -192,6 +192,13 @@ std::vector<std::string> get_split_regex(const std::string& pre) {
              "\\p{N}",
              "'s|'t|'re|'ve|'m|'ll|'d| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)",
          }},
+        {"spark2_5",
+         {
+             "\\p{N}{1,3}",
+             "[一-龥぀-ゟ゠-ヿ]+",
+             "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+|[\r\n]|\\s+(?!\\S)|\\s+",
+             "\\p{N}",
+         }},
     };
 
     if (regex_map.count(pre)) {
